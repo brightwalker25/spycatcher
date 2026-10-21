@@ -34,7 +34,14 @@ Dirs   = p+u+g+acl+xattrs+ftype
 /root   Checks
 
 # Userland persistence points. A rootkit that cannot get root settles for
-# these; they change rarely, so any change is worth a look.
+# these; they change rarely, so any change is worth a look. Their folders
+# get the lighter rule, like the system ones: a folder's size and times
+# change whenever a file is added, which the file itself already reports.
+@HOME@/\.config/autostart           d Dirs
+@HOME@/\.config/systemd/user        d Dirs
+@HOME@/\.config/environment\.d      d Dirs
+@HOME@/\.ssh                        d Dirs
+@HOME@/\.local/bin                  d Dirs
 @HOME@/\.config/autostart           Checks
 @HOME@/\.config/systemd/user        Checks
 @HOME@/\.config/environment\.d      Checks
@@ -59,7 +66,6 @@ Dirs   = p+u+g+acl+xattrs+ftype
 !/usr/lib/gdk-pixbuf-2\.0/2\.10\.0/loaders\.cache$
 !/usr/share/icons/[^/]+/icon-theme\.cache$
 !/usr/share/glib-2\.0/schemas/gschemas\.compiled$
-!/usr/lib/gio/modules/giomodule\.cache$
 !/usr/lib/.*/__pycache__/
 !/opt/containerd
 !/root/\.cache

@@ -13,6 +13,12 @@ import qs.Ui
 // of the weekly security report, and for every finding that is not green,
 // what it is, why it matters here, and what is being done about it.
 //
+// Every Text here shows its string as plain text (textFormat: Text.PlainText).
+// The report's findings quote file names, repository names, package output
+// and the names a model file imports, any of which an attacker can choose.
+// Qt's default format guesses at rich text, and rich text can load an image
+// from any URL, so a crafted name could make the desktop fetch a page.
+//
 // It renders whatever `security-report --json` hands it and decides nothing
 // itself. Every judgement, what counts as amber, when a quiet scan becomes a
 // finding, which known issues are managed, is made in that script and its
@@ -68,8 +74,13 @@ Panel {
   // cleanly, which the bar marks with a grey dot rather than no dot.
   readonly property string overall: rep ? String(rep.overall) : ""
 
+  // The bar draws the tooltip with its own text item, which already shows
+  // plain text. The report's line holds only counts, and the characters
+  // markup is made of are removed as well, in case a shell version renders
+  // it differently.
   readonly property string tooltip: {
-    if (root.rep) return "Security report: " + root.overall.toUpperCase() + ". " + (root.rep.line || "")
+    if (root.rep) return "Security report: " + root.overall.toUpperCase() + ". "
+      + String(root.rep.line || "").replace(/[<>&]/g, "")
     if (root.error !== "") return "Security report unavailable"
     return ""
   }
@@ -155,8 +166,8 @@ Panel {
   }
 
   // Runs whether or not the panel is open, because the bar lock's dot comes
-  // from the result. It only reads stored scan logs, which takes a tenth of a
-  // second and touches no network.
+  // from the result. It reads stored scan logs and asks pacman a few read-only
+  // questions, which takes a few seconds at most and touches no network.
   Timer {
     running: true
     interval: root.refreshMs
@@ -263,6 +274,7 @@ Panel {
 
     Text {
       id: pillLabel
+      textFormat: Text.PlainText
       anchors.centerIn: parent
       text: pill.rating !== "" ? pill.rating.toUpperCase() : "UNKNOWN"
       color: pill.tone
@@ -306,6 +318,7 @@ Panel {
 
       Text {
         id: whatText
+        textFormat: Text.PlainText
         width: parent.width
         text: finding.item ? finding.item.what : ""
         color: finding.compact ? root.dim : root.foreground
@@ -317,6 +330,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         visible: text !== "" && !finding.compact
         text: finding.item && finding.item.detail ? finding.item.detail : ""
@@ -327,6 +341,7 @@ Panel {
       }
 
       Text {
+        textFormat: Text.PlainText
         width: parent.width
         visible: !finding.compact && !!(finding.item && finding.item.action)
         text: finding.item && finding.item.action ? "What is being done: " + finding.item.action : ""
@@ -343,6 +358,7 @@ Panel {
   // plain: dim until hovered.
   component TextLink: Text {
     id: link
+    textFormat: Text.PlainText
     signal activated()
     color: linkMouse.containsMouse ? root.foreground : root.dim
     font.family: root.fontFamily
@@ -376,6 +392,7 @@ Panel {
 
       Text {
         id: chevron
+        textFormat: Text.PlainText
         anchors.left: parent.left
         anchors.verticalCenter: parent.verticalCenter
         // nf-md-chevron_down and nf-md-chevron_right.
@@ -387,6 +404,7 @@ Panel {
 
       Text {
         id: titleText
+        textFormat: Text.PlainText
         anchors.left: chevron.right
         anchors.leftMargin: Style.spacing.xs
         anchors.right: sectionPill.left
@@ -415,6 +433,7 @@ Panel {
     }
 
     Text {
+      textFormat: Text.PlainText
       width: block.width
       visible: text !== ""
       text: block.section && block.section.headline ? block.section.headline : ""
@@ -508,6 +527,7 @@ Panel {
               }
 
               Text {
+                textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
                 text: "Security report"
                 color: root.foreground
@@ -518,6 +538,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: root.rep ? (root.rep.line || "")
                 : (root.checking ? "Reading the report" : (root.error !== "" ? "The report could not be read." : "Not read yet"))
@@ -528,6 +549,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               visible: text !== ""
               text: root.checking ? "reading…" : root.fmtRange()
               color: root.dim
@@ -592,6 +614,7 @@ Panel {
             PanelSeparator { width: parent.width; foreground: root.foreground }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: root.error !== ""
               text: root.error
@@ -602,6 +625,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: root.stderrText !== ""
               text: root.stderrText

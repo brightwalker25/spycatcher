@@ -22,7 +22,7 @@ SB="$WORK/sb"
 STUB="$WORK/stub"
 # Every release of this plugin whose installer is in the git history.
 RELEASES=(v021:fc8cc3d v022:79c0c2e v023:de1c328 v024:0f64334 v025:c467467 v026:3f1f7d3 v027:bdf26c8
-  v028:534b5dd v029:16d6f9c v0210:e2953f7)
+  v028:534b5dd v029:16d6f9c v0210:e2953f7 v0211:49ea46b)
 
 pass=0 fail=0
 ok() { pass=$((pass + 1)); printf 'ok    %s\n' "$1"; }
@@ -629,7 +629,7 @@ for r in "${RELEASES[@]}"; do
   check "upgrade from $v: aide.conf made private, mode 600" test "$(mode_of "$ETC/aide.conf")" = 600
   check "upgrade from $v: risk-register.toml mode 640" test "$(mode_of "$ETC/risk-register.toml")" = 640
   check "upgrade from $v: scan.conf mode 640" test "$(mode_of "$ETC/scan.conf")" = 640
-  if [ "$v" != v0210 ]; then
+  if [ "$v" != v0210 ] && [ "$v" != v0211 ]; then
     check "upgrade from $v: says it made gitleaks.toml private" out_has "make $ETC/gitleaks.toml private (mode 0644 to 0600)"
   fi
   run "$NEW" --uninstall

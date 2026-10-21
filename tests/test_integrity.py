@@ -354,7 +354,8 @@ class EmptyListChangesNothingTest(unittest.TestCase):
     def grade(self, links):
         now = self.r.dt.datetime(2026, 9, 30, 12, 0)
         lines = (f"RED {LINE}\n"
-                 "PKG changed /usr/bin/ls (coreutils, verified by pacman)\n")
+                 "PKG changed /usr/bin/ls (coreutils, verified by pacman)\n"
+                 "=== done at 2026-09-30T12:00:00+01:00 ===\n")
         # Everything a listed link needs is true, so only the list decides.
         done = subprocess.CompletedProcess([], 0, stdout="", stderr="")
         answers = {"-Qqo": "tool-bin\n", "-Q": "tool-bin 1.1.0-1\n"}
@@ -362,6 +363,7 @@ class EmptyListChangesNothingTest(unittest.TestCase):
              mock.patch.object(self.r, "read", return_value=lines), \
              mock.patch.object(self.r, "listed_links", return_value=links), \
              mock.patch.object(self.r, "scriptlet_link_explains", return_value=False), \
+             mock.patch.object(self.r, "unchanged_since", return_value=True), \
              mock.patch.object(self.r.os.path, "islink", return_value=True), \
              mock.patch.object(self.r.os.path, "realpath", return_value=TARGET), \
              mock.patch.object(self.r.os.path, "isfile", return_value=True), \
@@ -472,7 +474,7 @@ class LimineSnapshotTest(unittest.TestCase):
                         for t, m in journal)
 
         def run(cmd, **kw):
-            self.assertEqual(cmd[0], "journalctl")
+            self.assertEqual(cmd[0], "/usr/bin/journalctl")
             self.assertIn(f"_EXE={self.r.LIMINE_SYNC_EXE}", cmd)
             return subprocess.CompletedProcess(cmd, 0, stdout=lines, stderr="")
 

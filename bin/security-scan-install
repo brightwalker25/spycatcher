@@ -489,7 +489,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
   echo "  ${RKH_LOCAL}           rkhunter overrides"
   echo "  /var/log/security-scan             scan logs"
   echo "  /var/lib/aide                      AIDE baseline"
-  echo "  /var/lib/security-scan             trusted copy of limine.conf"
+  echo "  /var/lib/security-scan             trusted copy of limine.conf, package file lists"
   echo "  ${TARGET_HOME}/.local/share/security-report   weekly HTML reports"
   echo "Delete them by hand if you no longer want them, for example:"
   echo "  sudo rm -r ${ETC} /var/log/security-scan /var/lib/aide /var/lib/security-scan"

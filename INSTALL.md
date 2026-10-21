@@ -215,7 +215,7 @@ group; the rest are root's alone.
 
 | File | Installed | Readable by | Holds |
 |---|---|---|---|
-| `scan.conf` | once, never overwritten | root and your group (0640) | the desktop user, the folder of repositories for gitleaks, the folders of model files, links to accept from install scripts |
+| `scan.conf` | once, never overwritten | root and your group (0640) | the desktop user, the folder of repositories for gitleaks, the folders of model files, links to accept from install scripts, files your own pacman hooks patch |
 | `aide.conf` | generated on every install | root (0600) | what AIDE watches and ignores |
 | `gitleaks.toml` | once, never overwritten | root (0600) | extra gitleaks rules and allowlists |
 | `risk-register.toml` | once, never overwritten | root and your group (0640) | your assessment of each known finding |
@@ -249,7 +249,7 @@ Use `sudo` to read `gitleaks.toml` and `aide.conf`.
 holds rkhunter exceptions for files that are known to be harmless on a stock
 Arch install.
 
-`scan.conf` sets four values:
+`scan.conf` sets five values:
 
 | Key | Default | Effect |
 |---|---|---|
@@ -257,11 +257,14 @@ Arch install.
 | `SCAN_ROOT` | `~/Work` | gitleaks scans every repository whose `.git` folder is at most three levels below this |
 | `MODEL_ROOTS` | `~/AI ~/.cache/huggingface` | folders searched for model files, separated by spaces; folders that do not exist are skipped |
 | `SCRIPTLET_LINKS` | empty | `link=package` pairs, separated by spaces: symlinks a package's install script points at a file it picks at run time, which AIDE then treats as package changes while they pass the checks described in the README; read only from the file, never the environment |
+| `HOOK_PATCHED` | empty | `file=hook:sha256` entries, separated by spaces: package files that a pacman hook of your own in `/etc/pacman.d/hooks` patches after each upgrade, given by the hook's file name and the SHA-256 of the file as patched (several sums may be separated by commas), which AIDE then treats as package changes while they pass the checks described in the README; read only from the file, never the environment |
 
 The installer writes the home folder out in full, since the scans run as root
 and `~` would mean root's home. A variable set in the environment overrides
-the file for that run, except `SCRIPTLET_LINKS`, which the weekly report also
-reads and so is taken from the file alone.
+the file for that run, except `SCRIPTLET_LINKS` and `HOOK_PATCHED`, which the
+weekly report also reads and so are taken from the file alone. A
+`scan.conf` installed before 0.2.12 has no `HOOK_PATCHED` line; add one by
+hand if you need it, since the installer never rewrites the file.
 
 `aide.conf` is generated from `system/aide.conf.in` in the checkout, with your
 home folder filled in, and is replaced every time the installer runs. If the
@@ -551,7 +554,7 @@ baselines:
 | `/etc/rkhunter.conf.local` | rkhunter exceptions |
 | `/var/log/security-scan` | scan logs |
 | `/var/lib/aide` | AIDE baselines |
-| `/var/lib/security-scan` | trusted copy of limine.conf |
+| `/var/lib/security-scan` | trusted copy of limine.conf, and the package file lists of the last AIDE check |
 | `~/.local/share/security-report` | weekly HTML reports |
 
 The packages (`arch-audit`, `lynis`, `gitleaks`, `rkhunter` and `aide`) are not

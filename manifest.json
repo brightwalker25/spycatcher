@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "brightwalker25.security-scan",
   "name": "Security Scan",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "author": "brightwalker25",
   "license": "MIT",
   "description": "The weekly security report in the bar: scan health, known vulnerabilities, file integrity, rootkits, leaked secrets and privacy, graded red, amber or green",

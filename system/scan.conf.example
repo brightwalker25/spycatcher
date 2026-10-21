@@ -28,3 +28,19 @@ MODEL_ROOTS="@HOME@/AI @HOME@/.cache/huggingface"
 # only from this file, never the environment. Empty by default. For example:
 # SCRIPTLET_LINKS="/usr/bin/voxtype=voxtype-bin /usr/lib/voxtype/voxtype-onnx-cuda=voxtype-bin"
 SCRIPTLET_LINKS=""
+
+# Package files that a pacman hook of this machine's own, in
+# /etc/pacman.d/hooks, patches after every upgrade of the package, as
+# file=hook:sha256 entries separated by spaces or new lines: the hook by its
+# file name, and the SHA-256 of the file as patched (sha256sum FILE), or
+# several separated by commas. AIDE reports a listed file as a package change
+# only while its content has one of those sums, the hook file is there, owned
+# by root and writable by no one else, pacman finds nothing wrong with the
+# file but its content, and the file was last changed within a minute of
+# pacman.log recording that hook running. A patch applied any other way,
+# other content, or a later edit stays red, and so does the file after an
+# upgrade changes it, until its new sum is added. Write the value out in
+# full; a variable or command in it empties the list. Read only from this
+# file, never the environment. Empty by default. For example:
+# HOOK_PATCHED="/usr/share/app/View.qml=app-view-fix.hook:<64 hex digits>"
+HOOK_PATCHED=""

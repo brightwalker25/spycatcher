@@ -26,6 +26,9 @@ esac
 : "${LOG_DIR:=/var/log/security-scan}"
 : "${GITLEAKS_CONFIG:=/etc/security-scan/gitleaks.toml}"
 : "${AIDE_CONFIG:=/etc/security-scan/aide.conf}"
+# How long the AIDE check waits for a running pacman to finish, in seconds.
+: "${PACMAN_WAIT:=600}"
+case "$PACMAN_WAIT" in '' | *[!0-9]*) PACMAN_WAIT=600 ;; esac
 KEEP=12
 
 # Values set in the environment win over scan.conf, so a one-off run can
@@ -131,6 +134,23 @@ fi
 
 log() { printf '%s\n' "$*" >>"$LOG"; }
 
+# What the scanning tools print can quote text an attacker chose: a pickle
+# file's import names, file names, package output. Copied into the log as it
+# is, a line of it could pass for one the scan writes, such as a forged
+# "summary:" or "!!" line, which the report trusts. So tool output reaches
+# the log only through log_tool, which shows control characters as "?" and
+# starts every line with "| ". The scan's own lines never start that way.
+log_tool() { LC_ALL=C sed -e 's/[[:cntrl:]]/?/g' -e 's/^/| /' >>"$LOG"; }
+# Python runs, for security-report's checks and the browser policy check,
+# with nothing from the environment but PATH, which systemd or sudo sets for
+# root, and the C locale, so no variable such as GCONV_PATH or
+# GIO_EXTRA_MODULES can steer what a check runs or builds.
+py() { env -i PATH="$PATH" LC_ALL=C python3 -I "$@"; }
+
+# A name from the file system, such as a repository folder, for a line the
+# scan writes itself: control characters, a new line among them, become "?".
+clean() { printf '%s' "${1//[[:cntrl:]]/?}"; }
+
 # True for a path inside the desktop user's home folder. An external command
 # given such a path shows it (a private key's file name, say) to every local
 # user through the process list, so these paths are only ever handled with
@@ -144,6 +164,17 @@ in_home() {
   return 1
 }
 
+# Notification text as markup-safe text. Many notification daemons read the
+# body, and some the title, as markup, where "<img src=...>" would make the
+# desktop fetch a URL and "&" can break the whole message, so &, < and > are
+# written as entities. The quotes keep bash 5.2's patsub_replacement from
+# reading "&" in the replacement as the matched text.
+markup() {
+  local s=${1//'&'/'&amp;'}
+  s=${s//'<'/'&lt;'}
+  printf '%s' "${s//'>'/'&gt;'}"
+}
+
 # Findings that only reach the journal are findings nobody reads, so speak to
 # the graphical session when there is one. Silently skipped on a headless boot;
 # the log is still written either way.
@@ -154,7 +185,8 @@ notify() {
   [ -S "$bus" ] || return 0
   runuser -u "$DESKTOP_USER" -- \
     env "DBUS_SESSION_BUS_ADDRESS=unix:path=${bus}" \
-    notify-send -a "Security scan" -u "$urgency" "$title" "$body" 2>/dev/null || true
+    notify-send -a "Security scan" -u "$urgency" "$(markup "$title")" "$(markup "$body")" \
+    2>/dev/null || true
 }
 
 # Keep the last $KEEP logs per mode. Left to the scanner rather than logrotate
@@ -176,14 +208,14 @@ arch-audit)
   # not a finding: the timer is Persistent, so a missed run catches up.
   if ! out=$(arch-audit --color=never 2>&1); then
     log "arch-audit failed (offline?), skipping this run:"
-    log "$out"
+    printf '%s\n' "$out" | log_tool
     # security-report ignores skipped runs, so the last real result stays in
     # force and a long offline stretch shows up as a stale scan.
     log "summary: skipped, offline"
     prune
     exit 0
   fi
-  log "$out"
+  printf '%s\n' "$out" | log_tool
 
   # --upgradable lists only what a pacman -Syu would actually fix.
   fixable=$(arch-audit --quiet --upgradable --color=never 2>/dev/null | grep -c . || true)
@@ -243,8 +275,8 @@ gitleaks)
       --report-format json \
       --report-path "$report" \
       --redact \
-      --no-banner) >>"$LOG" 2>&1
-    rc=$?
+      --no-banner) 2>&1 | log_tool
+    rc=${PIPESTATUS[0]}
 
     n=""
     if [ -s "$report" ]; then
@@ -254,15 +286,15 @@ gitleaks)
     n=${n:-0}
 
     if [ "$rc" -ne 0 ] && [ "$rc" -ne 3 ]; then
-      log "!! gitleaks errored on ${repo} (exit ${rc})"
+      log "!! gitleaks errored on $(clean "$repo") (exit ${rc})"
     fi
 
     if [ "$n" -gt 0 ]; then
       findings=$((findings + n))
       flagged=$((flagged + 1))
       log ""
-      log "--- ${repo}: ${n} finding(s) ---"
-      cat "$report" >>"$LOG"
+      log "--- $(clean "$repo"): ${n} finding(s) ---"
+      log_tool <"$report"
     fi
     rm -f "$report"
   done < <(find "$SCAN_ROOT" -maxdepth 3 -type d -name .git 2>/dev/null)
@@ -280,7 +312,7 @@ gitleaks)
 
 lynis)
   # --cronjob implies --quiet --no-colors and a non-interactive exit.
-  lynis audit system --cronjob >>"$LOG" 2>&1
+  lynis audit system --cronjob 2>&1 | log_tool
 
   report=/var/log/lynis-report.dat
   if [ -r "$report" ]; then
@@ -293,7 +325,7 @@ lynis)
     else
       cp -f "$report" "${LOG%.log}-report.dat"
     fi
-    index=$(awk -F= '/^hardening_index=/{print $2}' "$report" | tail -1)
+    index=$(awk -F= '/^hardening_index=[0-9]+$/{print $2}' "$report" | tail -1)
     warnings=$(grep -c '^warning\[\]=' "$report" || true)
     suggestions=$(grep -c '^suggestion\[\]=' "$report" || true)
 
@@ -301,7 +333,7 @@ lynis)
     log "summary: hardening index ${index:-?}, ${warnings} warning(s), ${suggestions} suggestion(s)"
     log ""
     log "--- warnings ---"
-    grep '^warning\[\]=' "$report" >>"$LOG" 2>/dev/null
+    grep '^warning\[\]=' "$report" 2>/dev/null | log_tool
 
     if [ "${warnings:-0}" -gt 0 ]; then
       notify normal "Lynis: ${warnings} warning(s)" \
@@ -334,30 +366,124 @@ aide)
     exit 0
   fi
 
+  # A package update rewrites thousands of files in seconds. Read by AIDE, or
+  # looked up in pacman's database, in the middle of one, the system is
+  # neither its old self nor its new one, and pacman itself can fail while
+  # its own libraries are being replaced, which made package files read as
+  # unpackaged reds. So the check waits for pacman to finish, by default up
+  # to ten minutes (PACMAN_WAIT), and a check that a package update
+  # overlapped is set aside whole: its summary says "skipped", which the
+  # report does not grade, and the baseline is kept, so the next check
+  # reports every change in full.
+  pacman_lock=/var/lib/pacman/db.lck
+  limine_new="" work=""
+  # pacman, and anything else built on libalpm, holds its lock file open for
+  # as long as it runs. A lock file nobody holds is left over from a pacman
+  # that crashed or was killed; it does not stop pacman -Ql or -Qkk, which
+  # only read, so the check goes ahead and says so.
+  pacman_busy() {
+    [ -e "$pacman_lock" ] &&
+      [ -n "$(find /proc/[0-9]*/fd -lname "$pacman_lock" -print -quit 2>/dev/null)" ]
+  }
+  set_aside() {
+    log "${1}, so this check was set aside and the baseline kept. The next check reports these changes."
+    log "summary: skipped, ${2}"
+    rm -f /var/lib/aide/aide.db.new.gz
+    [ -n "$limine_new" ] && rm -f "$limine_new"
+    [ -n "$work" ] && rm -rf "$work"
+    prune
+    exit 0
+  }
+  waited=0
+  while pacman_busy && [ "$waited" -lt "$PACMAN_WAIT" ]; do
+    sleep 10
+    waited=$((waited + 10))
+  done
+  pacman_busy &&
+    set_aside "pacman was still running after waiting ${PACMAN_WAIT} seconds (it holds ${pacman_lock})" \
+      "package update in progress"
+  [ -e "$pacman_lock" ] &&
+    log "${pacman_lock} is left over from a pacman that is no longer running; checking anyway. Remove it once no package manager is open."
+  pacman_size=$(stat -c %s /var/log/pacman.log 2>/dev/null || echo 0)
+  pacman_ran() {
+    local size
+    pacman_busy && return 0
+    size=$(stat -c %s /var/log/pacman.log 2>/dev/null || echo 0)
+    [ "$size" -lt "$pacman_size" ] && return 0
+    # grep -c reads to the end; grep -q would stop early and, under
+    # pipefail, the killed tail would make a match read as none.
+    [ "$(tail -c +"$((pacman_size + 1))" /var/log/pacman.log 2>/dev/null |
+      grep -c '\[ALPM\] transaction started')" -gt 0 ]
+  }
+
+  # Every change is graded from a few lookups made once for the whole run,
+  # not once per file: one pacman -Ql for who owns each path, one pacman -Qkk
+  # over the packages that own a changed file, and one call of
+  # security-report for the rarer explanations. A kernel update changes tens
+  # of thousands of files, and asking pacman about each in turn took longer
+  # than the scan's time limit. The lists live in a private folder of the
+  # scan's own temporary directory and are never put on a command line.
+  # pacman's messages are matched as English text, so it runs in the C locale.
+  work=$(mktemp -d) || {
+    log "!! could not make a temporary folder; nothing was graded and the baseline was kept"
+    log "summary: error, no temporary folder"
+    prune
+    exit 0
+  }
+  # Stops without grading anything and keeps the baseline, so the next run
+  # sees the same changes.
+  cannot_grade() {
+    log "!! ${1}; nothing was graded and the baseline was kept"
+    log "summary: error, ${2}"
+    rm -f /var/lib/aide/aide.db.new.gz
+    [ -n "$limine_new" ] && rm -f "$limine_new"
+    rm -rf "$work"
+    notify critical "File integrity check failed" "${2}. See ${LOG}"
+    prune
+    exit 0
+  }
+
+  # Every installed package's file list, taken just before AIDE reads the
+  # files, so it describes the same system. It grades this run, and is kept
+  # with the new baseline, so that the next run can tell which removed files
+  # belonged to a package that pacman has since upgraded or removed.
+  owners_ref=/var/lib/security-scan/owners.gz
+  {
+    LC_ALL=C pacman -Ql 2>/dev/null
+    echo "$?" >"$work/ql.rc"
+  } | gzip -1 >"$work/owners.gz"
+  [ "$(cat "$work/ql.rc" 2>/dev/null)" = 0 ] ||
+    cannot_grade "pacman could not list the files of installed packages" "pacman -Ql failed"
+
   # A copy of limine.conf taken before AIDE reads /boot. It becomes the
   # trusted copy that limine_snapshot_change compares against, but only when
   # this run finds nothing red under /boot and the file has not changed since.
   limine_ref=/var/lib/security-scan/limine.conf
-  limine_new=""
   if [ -f /boot/limine.conf ]; then
     install -d -m 0700 /var/lib/security-scan
     limine_new=$(mktemp /var/lib/security-scan/limine.conf.XXXXXX) &&
       cp -f /boot/limine.conf "$limine_new" || limine_new=""
   fi
 
+  # A new database left by an earlier run that failed must not be taken for
+  # this run's.
+  rm -f /var/lib/aide/aide.db.new.gz
   out=$(aide --update --no-progress --no-color -c "$AIDE_CONFIG" 2>&1)
   rc=$?
   # Exit codes 1, 2 and 4 are bits for added, removed and changed entries;
   # 14 and up are real errors.
   if [ "$rc" -ge 14 ]; then
     log "!! aide failed (exit ${rc}):"
-    log "$out"
+    printf '%s\n' "$out" | log_tool
     log "summary: error"
     [ -n "$limine_new" ] && rm -f "$limine_new"
+    rm -rf "$work"
     notify critical "File integrity check failed" "aide exit ${rc}. See ${LOG}"
     prune
     exit 0
   fi
+  pacman_ran && set_aside "pacman installed or removed packages while AIDE read the files" \
+    "package update during the check"
 
   # Package updates are the normal reason a system file changes. A file that
   # pacman owns and still verifies byte-for-byte is explained; anything else
@@ -369,86 +495,215 @@ aide)
   # The window is logged so security-report can re-read a red line against
   # exactly the transactions this count saw.
   last_run=$(stat -c %Y "$db" 2>/dev/null || echo 0)
+  since_ts=$(date -d "@${last_run}" '+%Y-%m-%dT%H:%M:%S')
   log "pacman window: $(date -d "@${last_run}" -Is) to $(date -Is)"
-  pacman_since=$(awk -v t="$(date -d "@${last_run}" '+%Y-%m-%dT%H:%M:%S')" \
+  # The version of the grading rules below. The weekly report re-applies its
+  # own copies of the rules only to red lines of logs from earlier versions.
+  log "graded by security-scan rules 2"
+  pacman_since=$(awk -v t="$since_ts" \
     '/\[ALPM\] (upgraded|installed|removed|reinstalled|downgraded) / { ts=substr($1,2,19); if (ts >= t) n++ } END { print n+0 }' \
     /var/log/pacman.log 2>/dev/null)
+  # The packages pacman upgraded, removed, reinstalled or downgraded in that
+  # window, any of which may have taken files away.
+  declare -A pkg_changed=()
+  while IFS= read -r p; do
+    pkg_changed[$p]=1
+  done < <(awk -v t="$since_ts" \
+    '/\[ALPM\] (upgraded|removed|reinstalled|downgraded) / { ts=substr($1,2,19); if (ts >= t) print $4 }' \
+    /var/log/pacman.log 2>/dev/null)
 
-  declare -A pkg_bad=()
-  pkg_checked() {
-    local pkg="$1"
-    if [ -z "${pkg_bad[$pkg]+x}" ]; then
-      # Content, size, link and ownership mismatches only. A bare mtime
-      # mismatch is common and harmless.
-      pkg_bad[$pkg]=$(pacman -Qkk "$pkg" 2>&1 | grep -E '^(warning|error):' |
-        grep -E 'checksum mismatch|Size mismatch|Symlink path mismatch|Permissions mismatch|UID mismatch|GID mismatch' || true)
-    fi
+  # Each change as "TYPE<tab>WHAT<tab>PATH". TYPE is the first letter of
+  # AIDE's summary (f, d, l and so on), the type of the entry now; a folder
+  # is told by that letter, never by looking at the path, which would follow
+  # a symlink put where a folder was. WHAT is added, removed or changed. AIDE
+  # writes a backslash or a control character in a name as \ooo (octal);
+  # names are decoded here. A name that then holds a control character, such
+  # as a new line, cannot be handled safely line by line: it is red, logged
+  # as AIDE wrote it.
+  aide_name() {
+    local s=$1 out="" ch
+    while [[ $s == *\\* ]]; do
+      out+=${s%%\\*}
+      s=${s#*\\}
+      if [[ $s =~ ^[0-7]{3} ]]; then
+        printf -v ch '%b' "\\0${s:0:3}"
+        out+=$ch
+        s=${s:3}
+      else
+        out+=\\
+      fi
+    done
+    REPLY=$out$s
   }
-
-  # Caches that a pacman hook rebuilds whenever a package adds to them. No
-  # package owns them, so a change is explained only when pacman.log shows
-  # the matching hook running in the minute before the file was written.
-  rebuild_hook() {
-    case "$1" in
-      /usr/share/applications/mimeinfo.cache) echo update-desktop-database.hook ;;
-      /usr/lib/gtk-3.0/3.0.0/immodules.cache) echo gtk-query-immodules-3.0.hook ;;
-      /usr/lib/gtk-4.0/4.0.0/*/giomodule.cache) echo gtk4-querymodules.hook ;;
+  bad_names=0
+  while IFS= read -r line; do
+    attr=${line%%: *}
+    raw=${line#*: }
+    case "$attr" in
+      ?++*) what=added ;;
+      ?--*) what=removed ;;
+      *) what=changed ;;
     esac
+    aide_name "$raw"
+    if [[ $REPLY == *[[:cntrl:]]* ]] || [ -z "$REPLY" ]; then
+      log "RED ${what} ${raw} (name holds control characters, shown as AIDE wrote it; check it by hand)"
+      bad_names=$((bad_names + 1))
+      continue
+    fi
+    printf '%s\t%s\t%s\n' "${attr:0:1}" "$what" "$REPLY"
+  done < <(printf '%s\n' "$out" | grep -E '^[fdlbcpsDP!][^:]*: /') >"$work/lines"
+  # Home folder paths have no package and must not reach pacman's output
+  # matching either, so they are left out of the lookups.
+  while IFS=$'\t' read -r type what path; do
+    in_home "$path" || printf '%s\n' "$path"
+  done <"$work/lines" >"$work/paths"
+
+  # Who owns each changed path, now and, for the files that were removed, at
+  # the last check, matched in awk against a list of every package file.
+  # pacman lists folders with a trailing slash; AIDE does not. The first
+  # package listed wins, as with pacman -Qqo | head -1.
+  owners_of() {
+    zcat -- "$1" 2>/dev/null | awk -v list="$work/paths" '
+      BEGIN { while ((getline l < list) > 0) want[l] = 1 }
+      {
+        i = index($0, " ")
+        if (!i) next
+        pkg = substr($0, 1, i - 1); p = substr($0, i + 1)
+        dir = (p ~ /\/$/) ? "d" : "-"
+        if (p != "/") sub(/\/$/, "", p)
+        if ((p in want) && !(p in seen)) { seen[p] = 1; print pkg "\t" dir "\t" p }
+      }'
   }
-  hook_wrote() {
-    local hook="$1" mtime ts t
-    mtime=$(stat -c %Y "$2" 2>/dev/null) || return 1
-    while IFS= read -r ts; do
-      t=$(date -d "$ts" +%s 2>/dev/null) || continue
-      [ "$mtime" -ge "$t" ] && [ "$mtime" -le $((t + 60)) ] && return 0
-    done < <(grep -F "running '${hook}'" /var/log/pacman.log 2>/dev/null |
-      sed -n 's/^\[\([^]]*\)\].*/\1/p' | tail -n 50)
+  # owner_dir marks the paths the package lists as a folder.
+  declare -A owner_of=() owner_dir=() was_owner_of=()
+  while IFS=$'\t' read -r o d p; do
+    owner_of[$p]=$o
+    [ "$d" = d ] && owner_dir[$p]=1
+  done < <(owners_of "$work/owners.gz")
+  if [ -s "$owners_ref" ]; then
+    while IFS=$'\t' read -r o d p; do
+      was_owner_of[$p]=$o
+    done < <(owners_of "$owners_ref")
+  fi
+
+  # Which packages own a file that is still there, and which changed files no
+  # package owns. The second list goes to security-report below.
+  declare -A need=()
+  : >"$work/explain"
+  # Folders count too: a folder's mode, owner or type is what AIDE watches
+  # on it, and pacman -Qkk checks those for the folders a package lists.
+  while IFS=$'\t' read -r type what path; do
+    [ "$what" = removed ] && continue
+    in_home "$path" && continue
+    if [ -n "${owner_of[$path]-}" ]; then
+      need[${owner_of[$path]}]=1
+    elif [ "$type" != d ]; then
+      printf '\037%s\0' "$path" >>"$work/explain"
+    fi
+  done <"$work/lines"
+
+  # Every mismatch pacman -Qkk reports for those packages, by path, as
+  # "KIND REASON;" entries: KIND is file or backup (a configuration file
+  # pacman keeps on upgrade), REASON is "content" for a checksum or size
+  # mismatch, else pacman's own words. A bare modification-time mismatch is
+  # common and harmless, so it is not kept. pacman prints a total line for
+  # each package it finishes; one missing means it stopped part way.
+  declare -A bad_of=() no_mtree=()
+  if [ "${#need[@]}" -gt 0 ]; then
+    # Standard output and error go to files of their own: pacman buffers the
+    # first and not the second, so in one file their lines can interleave.
+    LC_ALL=C pacman -Qkk "${!need[@]}" >"$work/qkk.out" 2>"$work/qkk.err"
+    [ "$(cat "$work/qkk.out" "$work/qkk.err" |
+      grep -cE '^[^ :]+: ([0-9]+ total files|no mtree file$)')" -eq "${#need[@]}" ] ||
+      cannot_grade "pacman -Qkk did not finish checking the packages" "pacman -Qkk failed"
+    while IFS= read -r l; do
+      # A package without the file list pacman checks against cannot vouch
+      # for any of its files.
+      case "$l" in *": no mtree file")
+        no_mtree[${l%: no mtree file}]=1
+        continue
+        ;;
+      esac
+      case "$l" in
+        "warning: "*) rest=${l#warning: } kind=file ;;
+        "error: "*) rest=${l#error: } kind=file ;;
+        "backup file: "*) rest=${l#backup file: } kind=backup ;;
+        *) continue ;;
+      esac
+      rest=${rest#*: }
+      reason=${rest##* (}
+      reason=${reason%)}
+      p=${rest% (*}
+      case "$reason" in
+        *"checksum mismatch" | "Size mismatch") bad_of[$p]+="${kind} content;" ;;
+        "Symlink path mismatch" | "File type mismatch" | "Permissions mismatch" | \
+          "UID mismatch" | "GID mismatch" | "failed to "*) bad_of[$p]+="${kind} ${reason};" ;;
+      esac
+    done < <(cat "$work/qkk.out" "$work/qkk.err")
+  fi
+  # True when every entry in $1 is a content mismatch of kind $2.
+  only_content() {
+    local e IFS=';'
+    [ -n "$1" ] || return 1
+    for e in $1; do [ "$e" = "$2 content" ] || return 1; done
+  }
+  # True when $1 has a mismatch other than a group or mode one.
+  not_group_mode() {
+    local e IFS=';'
+    for e in $1; do
+      case "$e" in *" GID mismatch" | *" Permissions mismatch") ;; *) return 0 ;; esac
+    done
     return 1
   }
 
-  # Symlinks a package's own install script makes. No package owns the link
-  # itself, so pacman cannot vouch for it. It is explained only while it
-  # resolves to a file a package owns and pacman verifies, and that package's
-  # install script has an `ln -s` command for the link's exact path whose
-  # literal target resolves to that same file. A target the script only knows
-  # at run time (a variable), two different targets, or a link repointed to
-  # any other file stays red. Prints the package. The install script is read
-  # by security-report's parser, so the scan and the report agree; the rest
-  # of this check is repeated there for RED lines logged before it existed,
-  # so change both together.
-  report_bin="$(dirname -- "$(readlink -f -- "$0")")/security-report"
-  scriptlet_link() {
-    local path="$1" target owner ver script want
-    [ -L "$path" ] || return 1
-    target=$(readlink -f -- "$path") && [ -f "$target" ] || return 1
-    # A target in the home folder has no owner and must not reach pacman.
-    in_home "$target" && return 1
-    owner=$(pacman -Qqo -- "$target" 2>/dev/null | head -1)
-    [ -n "$owner" ] || return 1
-    pkg_checked "$owner"
-    grep -qF " ${target} " <<<"${pkg_bad[$owner]}" && return 1
-    ver=$(pacman -Q -- "$owner" 2>/dev/null | awk '{ print $2 }')
-    script="/var/lib/pacman/local/${owner}-${ver}/install"
-    [ -n "$ver" ] && [ -f "$script" ] && [ -f "$report_bin" ] || return 1
-    want=$(python3 -I "$report_bin" --scriptlet-link-target "$script" "$path" 2>/dev/null) ||
-      return 1
-    [ -n "$want" ] && [ "$want" = "$target" ] || return 1
-    echo "$owner"
+  # True when every entry in $1 is a mode, owner or group mismatch, of a
+  # file or of a configuration file pacman keeps on upgrade.
+  only_mode() {
+    local e IFS=';'
+    [ -n "$1" ] || return 1
+    for e in $1; do
+      case "$e" in *" Permissions mismatch" | *" UID mismatch" | *" GID mismatch") ;;
+        *) return 1 ;;
+      esac
+    done
   }
+  # Package files whose only fault is their content are asked about too:
+  # a local hook listed in scan.conf, or the package's own install script,
+  # may have written them. So are those whose only fault is their mode or
+  # owner, which a file system without Unix modes, such as a FAT /boot,
+  # gives every file, or which a service tightened on its own configuration
+  # file. security-report also checks the hook-rebuilt caches, such as
+  # glibc's gconv-modules.cache, against what their tools build now.
+  for p in "${!bad_of[@]}"; do
+    [ -n "${owner_of[$p]-}" ] &&
+      { only_content "${bad_of[$p]}" file || only_mode "${bad_of[$p]}"; } &&
+      printf '%s\037%s\0' "${owner_of[$p]}" "$p" >>"$work/explain"
+  done
 
-  # Links named in scan.conf's SCRIPTLET_LINKS, for a package whose install
-  # script picks the target at run time, which scriptlet_link cannot check.
-  # Off unless listed. security-report does the whole check, reading the list
-  # from the file itself and never from the environment, so the scan and the
-  # report agree. Prints the package.
-  listed_link() {
-    local target
-    [ -z "$conf_error" ] && [ -L "$1" ] && [ -f "$report_bin" ] || return 1
-    # security-report asks pacman who owns the target; one in the home folder
-    # has no owner and must not reach that command line.
-    target=$(readlink -f -- "$1") && ! in_home "$target" || return 1
-    python3 -I "$report_bin" --listed-link "$SCAN_CONF" "$1" 2>/dev/null
-  }
+  # security-report holds these rules, so the scan and the weekly report
+  # agree, and reads the paths on standard input: a link made by a package's
+  # install script (literal target, or listed in scan.conf's
+  # SCRIPTLET_LINKS); a module index depmod rebuilt; a file the package's own
+  # install script wrote while pacman installed it; a package file a local
+  # hook listed in scan.conf's HOOK_PATCHED patched. scan.conf's lists are
+  # not read when the file itself was ignored. Prints "PATH\037REASON\0".
+  report_bin="$(dirname -- "$(readlink -f -- "$0")")/security-report"
+  declare -A explained=()
+  if [ -s "$work/explain" ] && [ -f "$report_bin" ]; then
+    conf_arg=$SCAN_CONF
+    [ -n "$conf_error" ] && conf_arg=""
+    py "$report_bin" --explain-changes "$conf_arg" /var/log/pacman.log \
+      <"$work/explain" >"$work/explained" 2>"$work/explain.err"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      log "!! security-report --explain-changes failed (exit ${rc}); the changes it would have explained are graded without it"
+      log_tool <"$work/explain.err"
+    fi
+    # Each record is PATH, GRADE (PKG or AMBER) and REASON.
+    while IFS=$'\037' read -r -d '' p g r; do
+      case "$g" in PKG | AMBER) explained[$p]="$g"$'\037'"$r" ;; esac
+    done <"$work/explained"
+  fi
 
   # Files a package's own install script hands to a group of its own with
   # the setgid bit (1password's browser helper, its op CLI). pacman's file
@@ -457,14 +712,15 @@ aide)
   # check, so the scan and the report agree. Prints the package.
   scriptlet_setgid() {
     [ -f "$report_bin" ] || return 1
-    python3 -I "$report_bin" --scriptlet-setgid "$1" 2>/dev/null
+    py "$report_bin" --scriptlet-setgid "$1" 2>/dev/null
   }
 
   # Package files that a local pacman hook deliberately rewrites. A browser's
   # policies.json gets telemetry and studies switched off after every browser
   # update, so it always fails pacman's checksum. It is explained only while
-  # the hook is installed and the file holds nothing but the browser's own policies
-  # and those two switches; any other policy (an extension, a proxy, a
+  # the hook is installed, pacman finds nothing wrong with the file but its
+  # content, and the file holds nothing but the browser's own policies and
+  # those two switches; any other policy (an extension, a proxy, a
   # certificate) leaves it red. security-report holds the same check, for
   # RED lines logged before this one existed; change both together.
   hook_rewrote() {
@@ -472,7 +728,7 @@ aide)
       /opt/zen-browser-bin/distribution/policies.json)
         [ -x /usr/local/lib/zen-privacy-policy ] &&
           [ -f /etc/pacman.d/hooks/zen-privacy-policy.hook ] &&
-          python3 -I -c '
+          py -c '
 import json, sys
 p = json.load(open(sys.argv[1])).get("policies")
 allowed = {"DisableAppUpdate", "DefaultSerialGuardSetting", "DisableTelemetry", "DisableFirefoxStudies"}
@@ -495,23 +751,32 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
   # lines, because /boot and the trusted copy are readable by root only.
   limine_snapshot_change() {
     [ -s "$limine_ref" ] && [ -f "$report_bin" ] || return 1
-    python3 -I "$report_bin" --limine-snapshot-change "$1" "$limine_ref" "$last_run" \
+    py "$report_bin" --limine-snapshot-change "$1" "$limine_ref" "$last_run" \
       >/dev/null 2>&1
   }
 
-  red=0 amber=0 pkg=0 boot_red=0
-  while IFS= read -r line; do
-    path="${line#*: }"
-    kind="${line%%:*}"
-    case "$kind" in
-      f++*|d++*|l++*) what=added ;;
-      f--*|d--*|l--*) what=removed ;;
-      *) what=changed ;;
-    esac
+  # The modules of a kernel that is no longer installed. kernel-modules-hook
+  # keeps the running kernel's modules through an upgrade and deletes them
+  # after the next boot, outside any pacman run, which used to list thousands
+  # of "unpackaged file removed" lines. security-report decides, once per
+  # kernel version; the files are then logged as one line that counts them.
+  declare -A kernel_gone=() gone_count=()
+  old_kernel() {
+    if [ -z "${kernel_gone[$1]-}" ]; then
+      kernel_gone[$1]=no
+      [ -f "$report_bin" ] &&
+        py "$report_bin" --old-kernel-modules "$1" >/dev/null 2>&1 &&
+        kernel_gone[$1]=yes
+    fi
+    [ "${kernel_gone[$1]}" = yes ]
+  }
 
-    # A directory only changes or appears because of what is in it, and
-    # those files are reported on their own.
-    [ -d "$path" ] && [ "$what" != removed ] && continue
+  red=$bad_names amber=0 pkg=0 boot_red=0
+  while IFS=$'\t' read -r type what path; do
+    # A folder that appears is reported through what is in it. A folder that
+    # changed had its mode, owner, ACL or type changed, which is graded like
+    # a file's.
+    [ "$type" = d ] && [ "$what" = added ] && continue
 
     # No package owns files in the home folder, so its paths skip pacman and
     # the link checks, which would show them in the process list, and get
@@ -520,40 +785,65 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
     if in_home "$path"; then
       home=1
     else
-      owner=$(pacman -Qqo "$path" 2>/dev/null | head -1)
+      owner=${owner_of[$path]-}
     fi
+    bad=${bad_of[$path]-}
+    [ -n "$owner" ] && [ -n "${no_mtree[$owner]-}" ] && bad="file no mtree file;"
+    # A path the package lists as a folder must still be one, and the
+    # reverse; a folder swapped for a symlink to elsewhere is the case that
+    # matters.
+    if [ -n "$owner" ] && [ "$what" != removed ]; then
+      is_dir=no listed_dir=no
+      [ "$type" = d ] && is_dir=yes
+      [ -n "${owner_dir[$path]-}" ] && listed_dir=yes
+      [ "$is_dir" = "$listed_dir" ] || bad+="file File type mismatch;"
+    fi
+    explanation=${explained[$path]-}
+    ex_grade=${explanation%%$'\037'*}
+    ex_reason=${explanation#*$'\037'}
     verdict=""
     if [ -n "$owner" ] && [ "$what" != removed ]; then
-      pkg_checked "$owner"
-      # Here-strings, not printf | grep -q: under pipefail an early match
-      # on long output kills printf and reads as no match.
-      if grep -qF " ${path} " <<<"${pkg_bad[$owner]}" &&
-        hook=$(hook_rewrote "$path") && [ -n "$hook" ]; then
-        verdict="PKG ${what} ${path} (${owner}, privacy switches added by the ${hook} hook)"
-      elif grep -qF " ${path} " <<<"${pkg_bad[$owner]}" &&
-        sg=$(scriptlet_setgid "$path") && [ -n "$sg" ]; then
-        verdict="PKG ${what} ${path} (${owner}, group and setgid bit set by its install script)"
-      elif grep -F " ${path} " <<<"${pkg_bad[$owner]}" |
-        grep -vE '\((GID|Permissions) mismatch\)$' >/dev/null; then
-        verdict="RED ${what} ${path} (owned by ${owner} but fails pacman's checksum)"
-      elif grep -qF " ${path} " <<<"${pkg_bad[$owner]}"; then
-        verdict="RED ${what} ${path} (owned by ${owner} but fails pacman's ownership or permission check)"
-      elif pacman -Qii "$owner" 2>/dev/null |
-        awk -v p="$path" '($1 == "MODIFIED" || $1 == "UNMODIFIED") && $2 == p { f = 1 } END { exit !f }'; then
-        verdict="AMBER ${what} ${path} (config file of ${owner}, edited locally)"
-      else
+      if [ -z "$bad" ]; then
         verdict="PKG ${what} ${path} (${owner}, verified by pacman)"
+      elif only_content "$bad" backup; then
+        verdict="AMBER ${what} ${path} (config file of ${owner}, edited locally)"
+      elif only_content "$bad" file && hook=$(hook_rewrote "$path") && [ -n "$hook" ]; then
+        verdict="PKG ${what} ${path} (${owner}, privacy switches added by the ${hook} hook)"
+      elif [ -n "$explanation" ]; then
+        verdict="${ex_grade} ${what} ${path} (${ex_reason})"
+      elif ! not_group_mode "$bad" && sg=$(scriptlet_setgid "$path") && [ -n "$sg" ]; then
+        verdict="PKG ${what} ${path} (${owner}, group and setgid bit set by its install script)"
+      elif not_group_mode "$bad"; then
+        verdict="RED ${what} ${path} (owned by ${owner} but fails pacman's checksum)"
+      else
+        verdict="RED ${what} ${path} (owned by ${owner} but fails pacman's ownership or permission check)"
       fi
-    elif [ -z "$owner" ] && [ "$what" = removed ]; then
-      verdict="AMBER ${what} ${path} (unpackaged file removed)"
+    elif [ -n "$owner" ]; then
+      # Removed, yet pacman still lists the file for an installed package,
+      # so no package change took it away.
+      verdict="AMBER ${what} ${path} (owned by ${owner} but missing, confirm it was you)"
     elif [ "$what" = removed ]; then
-      verdict="PKG ${what} ${path} (${owner}, removed by package change)"
-    elif hook=$(rebuild_hook "$path") && [ -n "$hook" ] && hook_wrote "$hook" "$path"; then
-      verdict="PKG ${what} ${path} (rebuilt by pacman's ${hook%.hook} hook)"
-    elif [ "$home" -eq 0 ] && link_pkg=$(scriptlet_link "$path") && [ -n "$link_pkg" ]; then
-      verdict="PKG ${what} ${path} (link made by ${link_pkg}'s install script, to the file it names, which pacman verifies)"
-    elif [ "$home" -eq 0 ] && link_pkg=$(listed_link "$path") && [ -n "$link_pkg" ]; then
-      verdict="PKG ${what} ${path} (link listed in scan.conf for ${link_pkg}, made by its install script, to a file pacman verifies)"
+      version=""
+      if [ "$home" -eq 0 ]; then
+        case "$path" in
+          /usr/lib/modules/?*)
+            version=${path#/usr/lib/modules/}
+            version=${version%%/*}
+            ;;
+        esac
+      fi
+      was=""
+      [ "$home" -eq 0 ] && was=${was_owner_of[$path]-}
+      if [ -n "$version" ] && old_kernel "$version"; then
+        gone_count[$version]=$((${gone_count[$version]:-0} + 1))
+        continue
+      elif [ -n "$was" ] && [ -n "${pkg_changed[$was]-}" ]; then
+        verdict="PKG ${what} ${path} (${was}'s at the last check, removed when pacman changed ${was})"
+      else
+        verdict="AMBER ${what} ${path} (unpackaged file removed)"
+      fi
+    elif [ "$home" -eq 0 ] && [ -n "$explanation" ]; then
+      verdict="${ex_grade} ${what} ${path} (${ex_reason})"
     else
       case "$path" in
         /boot/*)
@@ -570,7 +860,12 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
           verdict="AMBER ${what} ${path} (not from a package, confirm it was you)"
           ;;
         *)
-          verdict="RED ${what} ${path} (unpackaged file in a system code path)"
+          # The desktop user's home folder is amber wherever it is.
+          if [ "$home" -eq 1 ]; then
+            verdict="AMBER ${what} ${path} (not from a package, confirm it was you)"
+          else
+            verdict="RED ${what} ${path} (unpackaged file in a system code path)"
+          fi
           ;;
       esac
     fi
@@ -581,7 +876,17 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
       PKG*) pkg=$((pkg + 1)) ;;
     esac
     log "$verdict"
-  done < <(printf '%s\n' "$out" | grep -E '^[fdlbcps][^:]*: /')
+  done <"$work/lines"
+  for version in "${!gone_count[@]}"; do
+    n=${gone_count[$version]}
+    pkg=$((pkg + n))
+    log "PKG removed /usr/lib/modules/${version} (${n} entries, the modules of kernel ${version}, which is no longer installed)"
+  done
+
+  # A package update that started while the changes were being graded may
+  # have changed what pacman said about them part way through.
+  pacman_ran && set_aside "pacman installed or removed packages while this check ran" \
+    "package update during the check"
 
   # Keep the copy taken before the check as the trusted limine.conf only when
   # nothing under /boot is red and the file is still what was copied. A run
@@ -598,7 +903,11 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
   if [ -s /var/lib/aide/aide.db.new.gz ]; then
     cp -f "$db" /var/lib/aide/aide.db.prev.gz
     mv -f /var/lib/aide/aide.db.new.gz "$db"
+    # The package file lists that go with the new baseline.
+    install -d -m 0700 /var/lib/security-scan
+    install -m 0600 "$work/owners.gz" "$owners_ref"
   fi
+  rm -rf "$work"
 
   log ""
   log "summary: ${red} unexplained, ${amber} to confirm, ${pkg} from package updates"
@@ -612,7 +921,7 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
 rkhunter)
   # rkhunter's own greps trip GNU grep's obsolescence warnings; drop those.
   out=$(rkhunter --check --sk --nocolors --rwo 2>&1 | grep -v -E '^(e?grep|fgrep): warning')
-  log "$out"
+  printf '%s\n' "$out" | log_tool
 
   # rkhunter has no pacman support, so after an upgrade it reports every new
   # binary as "file properties changed". Accept those only when pacman
@@ -620,17 +929,23 @@ rkhunter)
   accepted=0 open=0
   changed=$(printf '%s\n' "$out" | awk '/file properties have changed/{f=1; next} /^Warning:/{f=0} f && /File: /{print $2}')
   unverified=""
+  # pacman -Qkk once per package: an upgrade can change many binaries of one
+  # package. A file swapped for a symlink shows only as a file type mismatch.
+  declare -A rk_bad=()
   for f in $changed; do
     # A home folder file, if rkhunter is set to watch one, has no package to
     # verify it and must not reach a command line; it stays unverified.
     owner=""
-    in_home "$f" || owner=$(pacman -Qqo "$f" 2>/dev/null | head -1)
+    in_home "$f" || owner=$(LC_ALL=C pacman -Qqo "$f" 2>/dev/null | head -1)
     bad=""
-    [ -n "$owner" ] && bad=$(pacman -Qkk "$owner" 2>&1 |
-      grep -E 'checksum mismatch|Size mismatch|Symlink path mismatch|Permissions mismatch|UID mismatch|GID mismatch')
-    if [ -n "$owner" ] && ! grep -qF " ${f} " <<<"$bad"; then
+    if [ -n "$owner" ]; then
+      [ -n "${rk_bad[$owner]+x}" ] || rk_bad[$owner]=$(LC_ALL=C pacman -Qkk "$owner" 2>&1 |
+        grep -E 'checksum mismatch|Size mismatch|Symlink path mismatch|Permissions mismatch|UID mismatch|GID mismatch|File type mismatch|failed to calculate|no mtree file')
+      bad=${rk_bad[$owner]}
+    fi
+    if [ -n "$owner" ] && ! grep -qF " ${f} " <<<"$bad" && [[ "$bad" != *"no mtree file"* ]]; then
       accepted=$((accepted + 1))
-    elif [ -n "$owner" ] && python3 -I "$(dirname -- "$(readlink -f -- "$0")")/security-report" \
+    elif [ -n "$owner" ] && py "$(dirname -- "$(readlink -f -- "$0")")/security-report" \
       --scriptlet-setgid "$f" >/dev/null 2>&1; then
       # Its install script set the group and setgid bit, see scriptlet_setgid.
       accepted=$((accepted + 1))
@@ -650,7 +965,7 @@ rkhunter)
   fi
 
   log ""
-  for f in $unverified; do log "UNVERIFIED ${f}"; done
+  for f in $unverified; do log "UNVERIFIED $(clean "$f")"; done
   log "summary: ${open} warning(s), ${accepted} changed file(s) verified by pacman"
 
   if [ "$open" -gt 0 ]; then
@@ -673,18 +988,28 @@ models)
     # picklescan still prints full paths, which go only to the log.
     out=$(cd -- "$root" 2>/dev/null || { echo "cannot enter the folder"; exit 2; }
       picklescan -p . --exclude-dir "$SKIP_DIRS" 2>&1)
-    log "--- ${root} ---"
-    log "$out"
-    # A crash mid-scan prints a traceback and no summary. That is a failed
-    # scan, not a clean one.
-    if ! printf '%s\n' "$out" | grep -q '^Scanned files'; then
-      log "!! picklescan did not finish on ${root}"
+    log "--- $(clean "$root") ---"
+    printf '%s\n' "$out" | log_tool
+    # The counts come only from picklescan's own summary, the block after
+    # the last "SCAN SUMMARY" line, which it prints after every file it
+    # names. An import name in a crafted file can hold new lines and
+    # imitate those lines, but only earlier in the output. A count that is
+    # not a plain number, or a crash mid-scan that prints a traceback and no
+    # summary, is a failed scan, not a clean one.
+    block=$(printf '%s\n' "$out" |
+      awk '/^-+ SCAN SUMMARY -+$/ { b = ""; f = 1; next } f { b = b $0 "\n" } END { printf "%s", b }')
+    count() { printf '%s\n' "$block" | sed -n "s/^$1: \([0-9]\{1,9\}\)\$/\1/p" | tail -1; }
+    s_scanned=$(count "Scanned files")
+    s_dangerous=$(count "Dangerous globals")
+    s_suspicious=$(count "Suspicious globals")
+    if [ -z "$s_scanned" ] || [ -z "$s_dangerous" ] || [ -z "$s_suspicious" ]; then
+      log "!! picklescan did not finish on $(clean "$root")"
       failed=$((failed + 1))
       continue
     fi
-    scanned=$((scanned + $(printf '%s\n' "$out" | awk -F': ' '/^Scanned files/{print $2+0}')))
-    dangerous=$((dangerous + $(printf '%s\n' "$out" | awk -F': ' '/^Dangerous globals/{print $2+0}')))
-    suspicious=$((suspicious + $(printf '%s\n' "$out" | awk -F': ' '/^Suspicious globals/{print $2+0}')))
+    scanned=$((scanned + 10#$s_scanned))
+    dangerous=$((dangerous + 10#$s_dangerous))
+    suspicious=$((suspicious + 10#$s_suspicious))
     # Counted from inside the folder too, for the same reason.
     n=$(cd -- "$root" 2>/dev/null && find -L . -type d -regextype posix-extended -regex ".*/${SKIP_DIRS}" -prune -o \
       -type f \( -iname '*.ckpt' -o -iname '*.pt' -o -iname '*.pth' -o -iname '*.bin' -o -iname '*.pkl' -o -iname '*.pickle' \) -print 2>/dev/null | wc -l)

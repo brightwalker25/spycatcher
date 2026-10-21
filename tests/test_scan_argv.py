@@ -33,14 +33,14 @@ WRAPPED = ("awk basename cat cmp cp cut date dirname env find grep head id insta
 
 WRAPPER = """#!/bin/bash
 printf '%s\\x1f' "{name}" "$@" >>"$CALLS/all"
-printf '\\n' >>"$CALLS/all"
+printf '\\x1e' >>"$CALLS/all"
 exec {real} "$@"
 """
 
 # Stand-ins. Each records its arguments the same way, then fakes a result.
 RECORD = """#!/bin/bash
 printf '%s\\x1f' "${0##*/}" "$@" >>"$CALLS/all"
-printf '\\n' >>"$CALLS/all"
+printf '\\x1e' >>"$CALLS/all"
 """
 
 GETENT = RECORD + """printf 'user:x:1000:1000::%s:/bin/bash\\n' "$FAKE_HOME"
@@ -52,6 +52,8 @@ RUNUSER = RECORD
 PACMAN = RECORD + """case "$1" in
   -Qqo) [ "${@: -1}" = /usr/bin/fakebin ] && echo fakepkg ;;
   -Q) echo "fakepkg 1.0-1" ;;
+  -Ql) printf 'fakepkg /usr/\\nfakepkg /usr/bin/\\nfakepkg /usr/bin/fakebin\\n' ;;
+  -Qkk) shift; for p in "$@"; do echo "$p: 1 total files, 0 altered files"; done ;;
 esac
 exit 0
 """
@@ -167,8 +169,10 @@ class ScanRun(unittest.TestCase):
 
     def argv(self):
         """Every recorded command line, as a list of arguments."""
-        return [line.split("\x1f")[:-1] for line in
-                (self.calls / "all").read_text().splitlines() if line]
+        # Calls end in \x1e rather than a new line, since an argument such
+        # as an awk program may hold new lines.
+        return [rec.split("\x1f")[:-1] for rec in
+                (self.calls / "all").read_text().split("\x1e") if rec]
 
     def assert_no_argv_has(self, needle, allow=()):
         for args in self.argv():
@@ -207,25 +211,31 @@ class AideHomePaths(ScanRun):
         self.assert_no_argv_has("id_client_secret")
 
     def test_home_paths_get_the_unpackaged_verdicts(self):
-        # The temporary home is outside /home, so an unpackaged file there
-        # falls to the system-path verdict, as it always has.
+        # The temporary home is outside /home. Since 0.2.12 the desktop
+        # user's home folder is amber wherever it is, not only under /home.
         h = self.home
-        self.assertIn(f"RED added {h}/.ssh/id_client_secret (unpackaged file in a system code path)",
+        self.assertIn(f"AMBER added {h}/.ssh/id_client_secret (not from a package, confirm it was you)",
                       self.log)
-        self.assertIn(f"RED changed {h}/.local/bin/linked-tool (unpackaged file in a system code path)",
-                      self.log)
+        self.assertIn(f"AMBER changed {h}/.local/bin/linked-tool (not from a package, confirm it was "
+                      "you)", self.log)
         self.assertIn(f"AMBER removed {h}/.ssh/id_old_client (unpackaged file removed)", self.log)
-        self.assertNotIn(f"changed {h}/.ssh ", self.log)
+        # A folder whose mode or owner changed is graded like a file since
+        # 0.2.12, by AIDE's type letter, not by looking at the path.
+        self.assertIn(f"AMBER changed {h}/.ssh (not from a package, confirm it was you)", self.log)
+        # A system link that points into the home folder is not in it.
         self.assertIn(f"RED added {self.outside} (unpackaged file in a system code path)", self.log)
 
     def test_system_paths_are_still_checked_with_pacman(self):
+        # Once for the whole run, never once per file: a kernel update
+        # changes tens of thousands of files.
         calls = [a for a in self.argv() if a[0] == "pacman"]
-        self.assertIn(["pacman", "-Qqo", "/usr/bin/fakebin"], calls)
-        self.assertIn(["pacman", "-Qqo", "/etc/fake-local.conf"], calls)
+        self.assertEqual(calls.count(["pacman", "-Ql"]), 1)
+        self.assertEqual([a for a in calls if a[1] == "-Qkk"], [["pacman", "-Qkk", "fakepkg"]])
+        self.assertFalse([a for a in calls if a[1] == "-Qqo"])
         self.assertIn("PKG changed /usr/bin/fakebin (fakepkg, verified by pacman)", self.log)
         self.assertIn("AMBER added /etc/fake-local.conf (not from a package, confirm it was you)",
                       self.log)
-        self.assertIn("summary: 3 unexplained, 2 to confirm, 1 from package updates", self.log)
+        self.assertIn("summary: 1 unexplained, 5 to confirm, 1 from package updates", self.log)
 
 
 class RkhunterHomePaths(ScanRun):

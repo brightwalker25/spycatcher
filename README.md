@@ -167,6 +167,26 @@ has never run is red. A scan whose last log records an error, or contains
 a line marked `!!`, is red as well, because a scan that fails every night is
 not protecting anything.
 
+A run that was stopped before it wrote its summary line, by a shutdown or by
+the unit's time limit, graded nothing. It is amber, and red when the unit
+says it ran past its time limit or the run before it did not finish either,
+since the next run meets the same work. A run that is still going, because
+its unit is active or its log was written in the last ten minutes, is not
+graded yet; the run before it is. A run counts as timed out when the unit
+says so or when its log kept being written for the whole 45 minute limit,
+since the unit's own record is reset when the next run starts.
+
+An AIDE check set aside because pacman was updating packages (`summary:
+skipped`) is not a result either. One is normal. When every check since the
+last graded one was set aside, the first of them a day ago, that is amber,
+and after three days red, with the reason the check logged.
+
+The report reads a scan's result only from the lines the scan wrote itself.
+Everything a scanning tool prints goes into the log with `| ` in front of
+each line and control characters shown as `?`, because it can quote text an
+attacker chose, such as a pickle file's import names, and a forged
+`summary:` or `!!` line must not pass for the scan's own.
+
 This is also what makes the bar widget safe to leave on a timer. The report
 reads stored results and probes nothing live, so a colour that is a few minutes
 old cannot hide a scan that went quiet: the report itself turns amber and then
@@ -179,11 +199,57 @@ and after a large upgrade it runs to thousands of lines. `security-scan aide`
 explains each change before it is reported:
 
 - A file owned by a package that `pacman -Qkk` still verifies (content, size,
-  link target, permissions and ownership all match the package) is counted as
-  a package change. A bare modification-time mismatch is ignored, because it is
-  common and harmless.
-- A file owned by a package that fails that check is red.
+  file type, link target, permissions and ownership all match the package) is
+  counted as a package change. A bare modification-time mismatch is ignored,
+  because it is common and harmless.
+- A file owned by a package that fails that check is red, and so is every
+  file of a package whose file list (mtree) is missing.
 - A package's configuration file that you have edited is amber.
+- A removed file is a package change when it belonged to a package, at the
+  last check, that pacman has since upgraded, removed, reinstalled or
+  downgraded. Each check keeps the package file lists beside the AIDE
+  baseline for this, in `/var/lib/security-scan/owners.gz`, readable by root
+  only. Any other removed file is amber, including one that pacman still
+  lists for an installed package.
+- The modules of a kernel that is no longer installed are one package-change
+  line that counts them, once the folder `/usr/lib/modules/<version>` is
+  gone, no package owns it, and it is not the running kernel's.
+  `kernel-modules-hook` keeps the running kernel's modules through an
+  upgrade and deletes them after the next boot, outside any pacman run.
+- The module index `depmod` writes into `/usr/lib/modules/<version>`
+  (`modules.dep`, `modules.alias`, their `.bin` forms and the rest) is a
+  package change when that folder belongs to an installed kernel package and
+  the file is byte for byte what depmod builds now. The check runs depmod
+  into a temporary folder that links to the real module tree, so nothing on
+  the system is written, once per kernel version and run, which takes about
+  a second. The modules themselves are checked as package files.
+- A file a package's own install script writes, such as a link to the build
+  that suits this CPU, or its own file it edits with `sed -i`, is a package
+  change when the file was last changed while pacman.log shows that package
+  being installed or upgraded to the version installed now, and that
+  version's install script has a command that writes the file's exact path:
+  a redirection, the last operand of `cp`, `mv`, `install` or `ln`, an
+  operand of `touch`, `tee` or `truncate`, a file `sed -i` edits, or `dd`'s
+  `of=`, written out or held in a variable the script gives one literal
+  value. When the script only names the path, for example removing it before
+  another program writes it again (graphviz's plugin list), the file is
+  amber, to confirm. A package's own file must otherwise pass pacman's check
+  apart from its content, and a link must point at a file of the same
+  package that pacman verifies. The time used is the file's change time
+  (ctime), which the kernel sets on every write and `touch` cannot set back,
+  so a file edited at any other moment, even by the same package's commands
+  run by hand, stays red. See Limits for what this rule cannot tell.
+- A package file that a pacman hook of your own patches after each upgrade
+  can be listed in `HOOK_PATCHED` in `scan.conf`, as
+  `file=hook:sha256`, with the SHA-256 of the file as patched (several sums
+  may be given, separated by commas). Nothing is listed by default. A listed
+  file is a package change only while its content has one of the listed
+  sums, the hook file is in `/etc/pacman.d/hooks`, owned by root and
+  writable by no one else, pacman finds nothing wrong with the file but its
+  content, and the file was last changed within a minute of pacman.log
+  recording that hook running. A patch applied by hand, other content, or a
+  later edit stays red. When the package changes the file upstream, the
+  patched file changes too, and stays red until its new sum is listed.
 - A changed file under `/boot` is a package change if pacman installed,
   upgraded or removed anything since the last check, because that is when the
   boot image is rebuilt. With no package change it is red, with one
@@ -205,8 +271,36 @@ explains each change before it is reported:
   weekly report cannot repeat this check for a red line logged earlier,
   because it cannot read `/boot` or the trusted copy, so those stay red.
 - A file that no package owns is amber under `/usr/local`, `/opt`, `/etc`,
-  `/root` and `/home`, where your own changes normally land, and red anywhere
-  else, such as `/usr/bin` or `/usr/lib`.
+  `/root`, `/home` and the desktop user's home folder wherever it is, where
+  your own changes normally land, and red anywhere else, such as `/usr/bin`
+  or `/usr/lib`. Watched folders in the home folder get the same lighter
+  folder rule as the system ones, so a new file in `~/.ssh` is one line,
+  not also a line for the folder's times.
+- A package file on a file system without Unix modes, such as a FAT `/boot`
+  mounted with `fmask=0077`, gets its mode and owner from the mount, so
+  pacman reports a permissions mismatch for it after every upgrade. It is a
+  package change when pacman finds nothing else wrong with it, its content
+  included, its mode, owner and group are exactly what the mount options
+  give, and those are safe: owned by root, in group root or the packaged
+  group, writable by no group or other, and with no permission the package
+  does not give apart from the execute bits FAT gives every file. A mount
+  that hands the files to a user, or lets others write them, stays red. The
+  weekly report runs as the desktop user, who cannot read such a
+  `/boot`, so it cannot re-check a red line of this kind logged earlier.
+- A cache that a pacman hook rebuilds (glibc's and lib32-glibc's
+  `gconv-modules.cache`, systemd's `hwdb.bin`, the GTK 3 input method
+  cache, the desktop file MIME cache, GIO's and GTK 4's GIO module caches) is a package change when it is byte for byte what its tool
+  (`iconvconfig`, `systemd-hwdb`, `gtk-query-immodules-3.0`,
+  `update-desktop-database`,
+  `gio-querymodules`) builds now, run by its full path with a fixed
+  environment into a temporary folder. When it was
+  written does not count, since `touch` can set that.
+- A configuration file a package keeps across upgrades (pacman's backup
+  list) whose only change is
+  a tighter mode, and perhaps another group, while root still owns it, is
+  amber, like an edited configuration file: cupsd rewrites `printers.conf`
+  0600 `root:cups`. A permission the package does not give, or another
+  owner, stays red. Only the scan, which runs as root, can check this.
 - A browser's `policies.json` that a local pacman hook rewrites after every
   update, to switch telemetry and studies off, always fails pacman's checksum.
   It is not red while that hook is installed and the file holds only the
@@ -233,9 +327,43 @@ explains each change before it is reported:
   The weekly report applies the same check, through the same code, to a red
   line logged before the link was listed.
 
+AIDE's own type letter decides whether an entry is a folder, never a look at
+the path, which would follow a symlink put where a folder was. A folder a
+package lists must still be a folder, and a file must not have become one; a
+folder whose mode or owner changed is graded like a file. AIDE writes a
+backslash or a control character in a name as `\ooo`; names are decoded
+before they are checked, and a name that holds a control character, such as
+a new line, is red as AIDE wrote it.
+
+The changes are graded from one `pacman -Ql` of every installed package's
+files, taken just before AIDE reads the system, one `pacman -Qkk` over the
+packages that own a changed file, and one call of `security-report` for the
+rules above that need it, never from one pacman call per file. A kernel
+update changes tens of thousands of files, which takes seconds this way. The
+lists are kept in the scan's private temporary folder and no path reaches a
+command line.
+
+A package update in the middle of a check gives a picture that is neither
+the old system nor the new one, and pacman itself can fail while its
+libraries are replaced. So the check waits up to ten minutes for a running
+pacman, one that holds its lock file open, before it starts. A lock file no
+process holds is left over from a pacman that crashed; the check notes it
+and goes ahead, since listing and checking packages only reads. A check during which pacman starts a transaction is
+set aside: it logs `summary: skipped`, which the report does not grade, and
+keeps the baseline, so the next check reports every change in full. If
+pacman cannot list or check its packages at all, the run is an error and the
+baseline is kept too.
+
 After each check it re-baselines, so the next run reports only what is new. The
 previous baseline is kept as `/var/lib/aide/aide.db.prev.gz`, and the logs keep
-every finding for the weekly report. In the report, amber changes are grouped
+every finding for the weekly report. Each log records the version of the
+rules it was graded with. The weekly report re-checks red lines logged by
+earlier versions against the rules above, and red lines of any version
+against `SCRIPTLET_LINKS` and `HOOK_PATCHED`, which may have been added to
+since, but only while the file has not changed since that check started: a
+file written later, or while the check ran, may not be what the check saw. It also clears a red
+"unpackaged" line whose file is a package's file that pacman verifies now
+and that has not changed since the run that logged it. In the report, amber changes are grouped
 by folder, so a week of ordinary work reads as a few lines rather than
 hundreds.
 
@@ -284,8 +412,9 @@ than theme colours, because a theme is free to make its urgent colour a soft
 pink, and a warning that reads as decoration does not work as a warning.
 
 The widget re-reads the report every five minutes whether or not the panel is
-open. That is cheap: the report only reads stored logs, touches no network, and
-takes a fraction of a second. It uses the copy installed in `/usr/local/bin`,
+open. That is cheap: the report reads stored logs and asks pacman a few
+read-only questions, touches no network, and takes about two seconds on the
+machine it was written on. It uses the copy installed in `/usr/local/bin`,
 and falls back to the copy in the plugin if the installed one is too old to
 support `--json`.
 
@@ -302,6 +431,14 @@ panel shows:
   the findings that need attention come first;
 - any error, or anything the report printed on stderr, such as a risk register
   that could not be parsed.
+
+Findings quote file names, repository names, package output and the names a
+model file imports, any of which someone else can choose. The panel shows
+every string as plain text, never as rich text, so a name that holds HTML,
+such as an image tag, is shown as the characters it is and loads nothing.
+The HTML report escapes every string, the terminal report shows control
+characters and text-reordering marks as `?`, and desktop notifications write
+`&`, `<` and `>` as entities.
 
 The panel can also be driven over IPC, for example from a key binding:
 
@@ -363,6 +500,19 @@ the schedule section.
 The gitleaks scan looks only at working trees, and only for repositories whose
 `.git` folder is at most three levels below the scan root, which means the
 repository itself is at most two levels below it.
+
+Several AIDE rules accept a file whose content cannot be compared with
+anything: a file a package's install script writes or edits, and an amber
+file it only names. They rest on when the file last changed, which only the
+kernel sets, so a file changed at any other moment stays red. A program that
+already runs as root could still wait for the package's step and write the
+file inside it, and that write would be accepted whatever it holds. The
+module index and `HOOK_PATCHED` files are compared by content and do not
+have this gap.
+
+AIDE does not record a file whose name is not valid UTF-8; it skips such a
+name without a word, so a file planted under one is not seen by this check.
+rkhunter's check of hidden and odd files is the only cover for that here.
 
 lynis is written with servers in mind. A score in the high 60s is typical for a
 desktop, and most of its suggestions are server hardening. Its warnings are

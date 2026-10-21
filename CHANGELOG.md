@@ -6,6 +6,216 @@ Notable changes to the Security Scan plugin and its scan suite. Versions follow
 
 ## [Unreleased]
 
+## [0.2.12] - 2026-10-21
+
+### Security
+
+- Text taken from scanned files could be read as markup by the bar panel.
+  The panel drew each finding with Qt's `Text` in its default format, which
+  guesses at rich text, so a pickle file whose import names held an
+  `<img src=...>` tag could make the desktop fetch an address of the
+  attacker's choosing when the panel showed that finding. The same holds for
+  file names, repository names and package output. Every `Text` in the
+  panel now shows its string as plain text, and the bar tooltip drops the
+  characters markup is made of. The HTML report already escaped every
+  string; a test now holds it to that.
+- The same text could forge lines of the scan log. picklescan prints a
+  pickle's import names, which may hold new lines, and the scan copied its
+  output into the log as it was, so a crafted name could add a `summary:`
+  line the report then took as the scan's own, or a `Dangerous globals:`
+  line that broke the scan's arithmetic and stopped it before the folders
+  after it were scanned. Everything a scanning tool prints now goes into the
+  log with `| ` in front of each line and control characters shown as `?`;
+  picklescan's counts are read only from its own summary block, the last
+  one it prints, and a count that is not a plain number makes the scan an
+  error. The report reads `summary:` and `!!` only from lines the scan
+  wrote, and the rootkit and lynis sections read their counts from the
+  scan's summary line rather than from the first match anywhere in the log.
+- Finding text in the terminal report could carry terminal control codes,
+  new lines, or Unicode marks that are invisible or reverse the order text
+  is shown in. The report now shows each such character as `?`, in the
+  terminal, the HTML page and the JSON the panel reads.
+- Notification titles and bodies are now written with `&`, `<` and `>` as
+  entities, since many notification daemons read the body as markup. They
+  hold counts and log paths only, so nothing visible changes.
+- The AIDE check skipped every changed path that the file system called a
+  folder. That test followed symlinks and used AIDE's escaped form of a
+  name, so a package folder swapped for a symlink to elsewhere was never
+  red, a folder whose mode or owner changed (`chmod 777 /etc/sudoers.d`) was
+  never reported, and a file whose name holds a new line could hide behind a
+  folder named like AIDE's escape for it. AIDE's own type letter now decides
+  what is a folder; a folder a package lists must still be one; a folder's
+  mode, owner and type are checked with `pacman -Qkk` like a file's; and
+  AIDE's `\ooo` escapes are decoded, with a name that holds a control
+  character graded red as AIDE wrote it.
+- A package file replaced by a symlink, or a symlink by a file, shows in
+  `pacman -Qkk` only as a "File type mismatch", which no check looked for,
+  so AIDE and rkhunter both accepted it as verified. Both now treat it as a
+  failed check, as they do a package whose file list (mtree) is missing.
+- A package configuration file edited on this machine, such as `/etc/hosts`,
+  was graded green as "verified by pacman". pacman 7 marks these
+  "backup file:" in `pacman -Qkk` and words `pacman -Qii` differently from
+  what the check read, so the amber "edited locally" verdict never fired.
+  It is now amber.
+- A file that pacman still lists for an installed package but that is no
+  longer on disk was graded as a package change. No package change removed
+  it, so it is now amber, to confirm.
+
+### Fixed
+
+- The AIDE check no longer runs out of time after a kernel update. It asked
+  pacman about each changed file in turn, twice, and a kernel update
+  changes tens of thousands of files, so on 2026-10-21 the run reached the
+  unit's 45 minute limit and was stopped. The baseline only moves on once
+  every change is graded, so each later run met the same pile. The check
+  now makes one `pacman -Ql` for the whole system, one `pacman -Qkk` over
+  the packages that own a changed file, and one call of `security-report`
+  for the rarer explanations. The same 46,000 changes now take about ten
+  to fifteen seconds. The lists stay in the scan's private temporary folder
+  and never reach a command line.
+- A check that a package update overlapped is set aside instead of graded.
+  On 2026-10-20 the check graded files while glibc was being replaced;
+  pacman crashed for a moment and fourteen icon files of `yaru-icon-theme`
+  read as unpackaged reds. The check now waits up to ten minutes for a
+  running pacman before it starts, and a check during which pacman starts a
+  transaction logs `summary: skipped`, which the report does not grade, and
+  keeps the baseline, so the next check reports every change in full. A
+  pacman counts as running only while a process holds its lock file open; a
+  lock file left by a pacman that crashed is noted and the check goes ahead.
+  Checks set aside since the last graded one are amber in "Scans ran on
+  schedule" once the first is a day old and red after three, with the
+  reason. If pacman cannot list or check its packages at all, the run is an
+  error and the baseline is again kept. A new database left by a failed
+  run is removed before AIDE runs, and a failure of the `security-report`
+  call is logged.
+- "Scans ran on schedule" read a run that was stopped before it finished as
+  a run on schedule, because its log held no error line. A run with no
+  summary line is now amber, and red when it ran past its time limit (the
+  unit says so, or its log was written to for the whole limit) or the run
+  before it did not finish either. A run that is still going (its unit is
+  active, or its log was written in the last ten minutes) is not graded;
+  the run before it is.
+- The modules of a kernel that is no longer installed read as thousands of
+  "unpackaged file removed" lines after each kernel update, because
+  `kernel-modules-hook` keeps the running kernel's modules until the next
+  boot and deletes them then, outside any pacman run. When the folder is
+  gone, no package owns it and it is not the running kernel's, they are now
+  one package-change line that counts them. The report applies the same
+  rule to such lines logged earlier.
+- Files removed by a package upgrade or removal read as amber, because the
+  package no longer listed them. The check now keeps each installed
+  package's file list beside the AIDE baseline, in
+  `/var/lib/security-scan/owners.gz`, readable by root only, and a removed
+  file that belonged to a package pacman has since upgraded, removed,
+  reinstalled or downgraded is a package change. The first check after
+  upgrading has no saved list yet and grades removals as before.
+- The module index that `depmod` writes into `/usr/lib/modules/<version>`
+  (`modules.dep`, `modules.alias`, their `.bin` forms and the rest) after a
+  kernel update read as unpackaged reds. It is now a package change when
+  the folder belongs to an installed kernel package and the file is byte for
+  byte what depmod builds now, run into a temporary folder that links to
+  the real module tree.
+- Files a package's own install script writes read as unpackaged reds or
+  checksum failures: a voice typing tool links `/usr/bin/<name>` to the
+  build for this CPU, and 1password rewrites its polkit policy with `sed -i`
+  on every upgrade. Such a file is now a package change when it was last
+  changed while pacman.log shows that package being installed or upgraded to
+  the version installed now, and that version's install script has a
+  command that writes the file's exact path (a redirection, `cp`, `mv`,
+  `install`, `ln`, `touch`, `tee`, `truncate`, `sed -i` or `dd of=`), with
+  the path written out or held in a variable the script gives one value. A
+  file the script only names is amber: graphviz removes its plugin list and
+  has `dot -c` write it again, which no rule can read. A package file must
+  otherwise pass pacman's check apart from its content; a symlink must
+  point at a file of the same package that pacman verifies. The check uses
+  the file's change time (ctime), which `touch` cannot set back, so a file
+  edited at any other moment stays red. The README's Limits section says
+  what this cannot tell.
+- The report re-checks red lines logged before this version against these
+  rules, and also clears a red "unpackaged" line when the file is a
+  package's file that pacman verifies now and that has not changed since
+  before the run that logged it, which was the mark of the lookups that
+  failed during the 2026-10-20 update. A line is re-checked only while the
+  file has not changed since that run started, so a later rewrite inside a
+  package's window, or a write while the check ran, cannot clear an earlier
+  red. Removed files under the module folder of a kernel that is no longer
+  installed, which an earlier version listed one by one (a run on
+  2026-10-21 listed 29,551 of them), are folded into the count of package
+  changes. Each AIDE log now records
+  the version of the rules it was graded with, and lines graded with these
+  rules are re-checked only against `SCRIPTLET_LINKS` and `HOOK_PATCHED`.
+- The report keeps pacman's answers for the length of one run and asks who
+  owns every re-checked file in one call. Re-checking the logs of the week
+  of this release made it take about ten seconds; it now takes about two on
+  the machine it was written on, faster than 0.2.11.
+
+- Every package file on a FAT `/boot` failed pacman's permission check,
+  because the mount gives all files one mode (`fmask=0077`), so
+  `/boot/amd-ucode.img` was red after every amd-ucode upgrade. On a file
+  system without Unix modes (FAT, exFAT, NTFS), a package file whose only
+  faults are a mode, owner and group exactly matching the mount options,
+  and whose content pacman verifies, is now a package change, as long as
+  that mode and owner are safe: root's, in group root or the packaged
+  group, writable by no group or other, and with no permission the package
+  does not give apart from FAT's execute bits. A mount that hands the files
+  to a user (`uid=1000`) or to everyone (`umask=0000`) stays red. Of mounts
+  stacked on one mount point, the one in use counts.
+- glibc's `/usr/lib/gconv/gconv-modules.cache`, which its pacman hook
+  rebuilds, read as an unpackaged red, and so did lib32-glibc's
+  `/usr/lib32/gconv/gconv-modules.cache` and systemd's hardware database
+  `/usr/lib/udev/hwdb.bin`. The caches pacman hooks rebuild (gconv and
+  lib32 gconv, the hardware database, GTK 3 input methods, desktop MIME
+  types, GIO and GTK 4 GIO modules) are
+  now explained only when they are byte for byte what their tool builds
+  now, run into a temporary folder. 0.2.11 accepted the GTK and MIME caches
+  when their modification time fell just after the hook ran, which `touch`
+  can set. The report applies the rule to older lines.
+- cupsd rewrites `/etc/cups/printers.conf` and `classes.conf` 0600
+  `root:cups`, which read as a red ownership or permission failure. A
+  configuration file a package keeps across upgrades, by the backup list in
+  pacman's database, whose only change is a tighter mode, and perhaps
+  another group, while root still owns it, is now amber, like an edited
+  configuration file. A permission the package does not give, or another
+  owner, stays red. pacman 7 reports such a mode change as a plain warning,
+  not a "backup file:" line, so the backup list is read from its database.
+- The desktop user's home folder is amber wherever it is; one outside
+  `/home` was graded as a system code path. The watched home folders get
+  the lighter folder rule (`~/.config/autostart`, `~/.config/systemd/user`,
+  `~/.config/environment.d`, `~/.ssh`, `~/.local/bin`), so a new file there
+  is not also reported as a change to the folder.
+- Model findings in the panel and report no longer show the `| ` the log
+  puts in front of tool output.
+
+### Added
+
+- `HOOK_PATCHED` in `scan.conf`: package files that a pacman hook of this
+  machine's own patches after each upgrade, as `file=hook:sha256` entries,
+  with the SHA-256 of the file as patched (several may be given, separated
+  by commas). A listed file is a package change only while its content has
+  one of those sums, the hook file is in `/etc/pacman.d/hooks`, owned by
+  root and writable by no one else, pacman finds nothing wrong with the
+  file but its content, and the file was last changed within a minute of
+  pacman.log recording that hook running. Empty by default. It is read the
+  way `SCRIPTLET_LINKS` is: only from the file, only when written out
+  literally.
+
+### Changed
+
+- `pacman` runs in the C locale wherever its messages are read, since they
+  are matched as English text.
+- The report starts every program by its full path in `/usr/bin` with a
+  fixed environment (a system PATH and the C locale), and the scan runs its
+  Python checks with nothing from the environment but PATH, so a folder
+  early in a session's PATH, or a variable such as `GCONV_PATH` or
+  `GIO_EXTRA_MODULES`, cannot steer a pacman call or a rebuilt cache.
+- AIDE now watches GIO's own module cache,
+  `/usr/lib/gio/modules/giomodule.cache`, which was excluded as churn; it is
+  explained when `gio-querymodules` builds the same file.
+- rkhunter's check of changed binaries asks `pacman -Qkk` once per package
+  rather than once per file.
+- The README's Limits section now says that AIDE skips a file whose name is
+  not valid UTF-8.
+
 ## [0.2.11] - 2026-10-15
 
 ### Security

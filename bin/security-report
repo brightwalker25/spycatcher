@@ -21,18 +21,22 @@ reads any other Black Ops file and never runs Black Ops.
 
 import argparse
 import contextlib
+import functools
 import datetime as dt
 import grp
 import gzip
+import hashlib
 import html
 import json
 import os
 import pwd
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 
@@ -70,6 +74,24 @@ def overall_of(sections):
     return worst(*rated) if rated else GREEN
 
 
+# Control characters, and the Unicode marks that reorder text on screen.
+# Finding text comes from scanned files, file names, repository names and
+# package output, so it may hold a terminal escape sequence that rewrites what
+# the terminal shows, or a bidirectional override that makes a name read as
+# something else. Each one is shown as "?" instead.
+_UNSAFE_CHARS = re.compile("[\x00-\x08\x0a-\x1f\x7f-\x9f\u061c\u200b-\u200f\u2028-\u202e"
+                           "\u2066-\u2069\ufeff]")
+
+
+def plain(text):
+    """`text` as a string safe to print: control characters, new lines
+    among them, and invisible or reordering marks replaced with "?", so a
+    finding is one line that reads as it is. A tab is kept. Markup is left
+    as it is: the HTML report escapes it, and the bar panel shows every
+    string as plain text."""
+    return _UNSAFE_CHARS.sub("?", str(text))
+
+
 class Section:
     def __init__(self, title, rating, headline):
         self.title = title
@@ -78,7 +100,7 @@ class Section:
         self.items = []  # (rating, what, detail, action)
 
     def add(self, rating, what, detail="", action=""):
-        self.items.append((rating, what, detail, action))
+        self.items.append((rating, plain(what), plain(detail), plain(action)))
         self.rating = worst(self.rating, rating)
 
 
@@ -107,16 +129,37 @@ def logs(mode, since):
     return recent, latest
 
 
+# Logs read during one run of the report, by path, size and modification
+# time: several sections read the same logs, and an AIDE log after a large
+# update runs to tens of megabytes.
+_READ_CACHE = {}
+
+
 def read(p):
     try:
-        return p.read_text(errors="replace")
+        st = os.stat(p)
+        key = (str(p), st.st_size, st.st_mtime_ns)
+        if key not in _READ_CACHE:
+            if len(_READ_CACHE) > 64:
+                _READ_CACHE.clear()
+            _READ_CACHE[key] = Path(p).read_text(errors="replace")
+        return _READ_CACHE[key]
     except OSError:
         return ""
 
 
 def summary(text):
-    m = re.findall(r"^summary: (.*)$", text, re.M)
-    return m[-1] if m else None
+    """The last line the scan wrote that starts "summary: ", without that
+    prefix, or None. Searched from the end, since logs can be large."""
+    end = len(text)
+    while True:
+        i = text.rfind("summary: ", 0, end)
+        if i < 0:
+            return None
+        if i == 0 or text[i - 1] == "\n":
+            j = text.find("\n", i)
+            return text[i + 9:j if j >= 0 else len(text)]
+        end = i
 
 
 def ago(when, now):
@@ -129,20 +172,112 @@ def ago(when, now):
 
 # --- sections ----------------------------------------------------------------
 
+# A log with no summary line is a run that is still going or one that was
+# stopped. A run started by hand has no unit to ask, so a log written to in
+# the last few minutes also counts as still going.
+QUIET_MINUTES = 10
+# TimeoutStartSec of security-scan@.service.
+TIME_LIMIT_MINUTES = 45
+# An AIDE check set aside because pacman was running ("summary: skipped") is
+# not a result. One is normal; checks set aside for this long are a finding.
+SKIPPED_AMBER_DAYS, SKIPPED_RED_DAYS = 1, 3
+
+
+def _unit(mode, prop):
+    """A property of the scan's systemd unit, or "" when it cannot be read."""
+    return run(["systemctl", "show", "--value", "-p", prop,
+                f"security-scan@{mode}.service"]).strip()
+
+
+def _still_running(mode, p, now):
+    if _unit(mode, "ActiveState") in ("active", "activating", "reloading"):
+        return True
+    try:
+        written = dt.datetime.fromtimestamp(Path(p).stat().st_mtime)
+    except OSError:
+        return False
+    return now - written < dt.timedelta(minutes=QUIET_MINUTES)
+
+
+def skipped_aide(s, now):
+    """Adds a finding when the AIDE checks since the last graded one were all
+    set aside, the first of them a day ago or more."""
+    runs = []
+    for p in LOG_DIR.glob("aide-*.log"):
+        m = re.match(r"aide-(\d{8}-\d{6})\.log$", p.name)
+        if m:
+            runs.append((dt.datetime.strptime(m.group(1), "%Y%m%d-%H%M%S"), p))
+    runs.sort()
+    skipped = []
+    for when, p in reversed(runs):
+        text = read(p)
+        if not (summary(text) or "").startswith("skipped"):
+            break
+        skipped.insert(0, (when, text))
+    if not skipped:
+        return
+    first = skipped[0][0]
+    days = (now - first).days
+    if days < SKIPPED_AMBER_DAYS:
+        return
+    why = re.findall(r"^(.*), so this check was set aside", skipped[-1][1], re.M)
+    s.add(RED if days >= SKIPPED_RED_DAYS else AMBER,
+          f"aide: {len(skipped)} check(s) since {first:%a %d %b} were set aside",
+          (why[-1] + ".") if why else "",
+          "AIDE grades nothing while pacman is running. If no package manager is open, "
+          "check for a stuck pacman, or remove a lock file nothing holds: "
+          "sudo rm /var/lib/pacman/db.lck")
+
+
 def scan_health(now, since):
     s = Section("Scans ran on schedule", GREEN, "")
     late = 0
     for mode, (cadence, amber_days, red_days) in SCANS.items():
-        _, latest = logs(mode, since)
-        if not latest:
+        runs, _ = logs(mode, dt.datetime.min)
+        if not runs:
             s.add(RED, f"{mode} has never run", "", f"Check: systemctl status security-scan-{mode}.timer")
             late += 1
             continue
-        when, p = latest
-        age = (now - when).days
+        when, p = runs[-1]
         text = read(p)
-        failed = (summary(text) or "").startswith("error") or "!! " in text
-        if failed:
+        if summary(text) is None and _still_running(mode, p, now):
+            # Grade the run before this one; this one has no result yet.
+            if len(runs) == 1:
+                s.add(GREEN, f"{mode}: first run in progress, started {ago(when, now)}")
+                continue
+            runs = runs[:-1]
+            when, p = runs[-1]
+            text = read(p)
+        age = (now - when).days
+        failed = ((summary(text) or "").startswith("error")
+                  or re.search(r"^!! ", text, re.M) is not None)
+        if summary(text) is None:
+            # Stopped before it wrote a result: nothing it found was graded,
+            # and for AIDE the baseline did not move, so the next run meets
+            # the same changes. Once may be a shutdown; a time-out, or twice
+            # in a row, will not clear up on its own.
+            before = runs[-2][1] if len(runs) > 1 else None
+            again = before is not None and summary(read(before)) is None
+            # The unit's result describes its latest start, which a new run
+            # resets, so a log that kept being written to for the whole
+            # time limit counts as timed out as well.
+            try:
+                lasted = dt.datetime.fromtimestamp(Path(p).stat().st_mtime) - when
+            except (OSError, TypeError):
+                lasted = dt.timedelta(0)
+            timed_out = (_unit(mode, "Result") == "timeout"
+                         or lasted >= dt.timedelta(minutes=TIME_LIMIT_MINUTES - 1))
+            what = ("ran past its time limit" if timed_out
+                    else "stopped before it wrote a result")
+            journal = f"journalctl -u security-scan@{mode}.service"
+            action = (f"Check: {journal}. The next run meets the same work, so it needs a "
+                      "fix, not a wait." if timed_out or again else
+                      "Usually the machine shut down mid-run, and the next run catches up. "
+                      f"If it repeats, check: {journal}")
+            s.add(RED if timed_out or again else AMBER,
+                  f"{mode}: last run did not finish ({ago(when, now)})",
+                  f"The run {what}, so nothing it found was graded. {p}", action)
+        elif failed:
             s.add(RED, f"{mode}: last run failed ({ago(when, now)})", str(p),
                   "Read the log; the scan is not protecting anything until this is fixed.")
         elif age >= red_days:
@@ -155,6 +290,7 @@ def scan_health(now, since):
             late += 1
         else:
             s.add(GREEN, f"{mode}: {cadence.lower()}, last ran {ago(when, now)}")
+    skipped_aide(s, now)
     bad = sum(1 for r, *_ in s.items if r != GREEN)
     s.headline = "All six scans are running on time." if not bad else f"{bad} of 6 scans need attention."
     return s
@@ -167,8 +303,10 @@ def packages(now, since, reg, installed):
         s.rating, s.headline = AMBER, "No arch-audit result yet."
         return s
     text = read(latest[1])
-    affected = re.findall(r"^(\S+) is affected by (.*?)\. (High|Medium|Low|Critical) risk!", text, re.M)
-    fixable = re.search(r"(\d+) fixable by upgrade", text)
+    # Tool output is logged with "| " in front since 0.2.12.
+    affected = re.findall(r"^(?:\| )?(\S+) is affected by (.*?)\. (High|Medium|Low|Critical) risk!",
+                          text, re.M)
+    fixable = re.search(r"(\d+) fixable by upgrade", summary(text) or "")
     fixable = int(fixable.group(1)) if fixable else 0
 
     if fixable:
@@ -250,23 +388,44 @@ def hook_explains(line):
     return all(os.path.exists(f) for f in files) and ok(m.group(1))
 
 
+# pacman's messages are matched as English text, so it always runs in the C
+# locale.
+# Every program the report starts is named by its full path and runs with
+# this environment alone, so nothing in the desktop session, such as a
+# folder early in PATH, GCONV_PATH, GTK_PATH or GIO_EXTRA_MODULES, can steer
+# what it runs or what a rebuilt cache holds. pacman's messages are matched
+# as English text, so everything runs in the C locale.
+TOOLS = "/usr/bin"
+SAFE_ENV = {"PATH": "/usr/bin:/usr/sbin:/bin:/sbin", "LC_ALL": "C"}
+_C_LOCALE = SAFE_ENV
+
+
+def _tool(name):
+    return os.path.join(TOOLS, name)
+
+
 def _pacman(*args):
     """pacman's output for `args`, or None if it fails. A path asked about
     with -Qqo is passed on standard input, which pacman reads for the target
     "-", rather than as an argument: a command line can be read by any local
     user in the process list, and a link in a system folder may point into a
     home folder or a repository whose name is private."""
-    stdin = None
+    if _PACMAN_CACHE is not None and args in _PACMAN_CACHE:
+        return _PACMAN_CACHE[args]
+    key, stdin = args, None
     if args[:2] == ("-Qqo", "--") and len(args) == 3:
         if "\n" in args[2]:
             return None
         args, stdin = ("-Qqo", "-"), args[2] + "\n"
     try:
-        r = subprocess.run(["pacman", *args], input=stdin, capture_output=True, text=True,
-                           timeout=60)
+        r = subprocess.run([_tool("pacman"), *args], input=stdin, capture_output=True, text=True,
+                           timeout=60, env=_C_LOCALE)
+        out = r.stdout if r.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
-        return None
-    return r.stdout if r.returncode == 0 else None
+        out = None
+    if _PACMAN_CACHE is not None:
+        _PACMAN_CACHE[key] = out
+    return out
 
 
 def _names_exactly(text, path):
@@ -382,22 +541,65 @@ def scriptlet_link_target(script, link):
     return found.pop() if len(found) == 1 else None
 
 
+# What pacman -Qkk says of a file whose content, link, type, mode or owner is
+# not as packaged. A bare modification-time mismatch is harmless and common.
+# A file replaced by a symlink, or a symlink by a file, is reported only as a
+# file type mismatch.
+_QKK_BAD = re.compile(r"checksum mismatch|Size mismatch|Symlink path mismatch|Permissions mismatch"
+                      r"|UID mismatch|GID mismatch|File type mismatch")
+# Mismatches that mean only the content changed.
+_QKK_CONTENT = re.compile(r"\((?:\S+ )?checksum mismatch\)$|\(Size mismatch\)$"
+                          r"|\(Modification time mismatch\)$")
+
+# pacman's answers, kept for one run of the report or of --explain-changes,
+# which ask about the same few packages and files many times. The package
+# database does not change while one run reads it. None means no caching,
+# as when the functions are called one at a time.
+_QKK_CACHE = None
+_PACMAN_CACHE = None
+
+
+def _qkk(owner):
+    """pacman -Qkk's output for package `owner`, or None when it fails."""
+    if _QKK_CACHE is not None and owner in _QKK_CACHE:
+        return _QKK_CACHE[owner]
+    try:
+        checked = subprocess.run([_tool("pacman"), "-Qkk", owner], capture_output=True, text=True,
+                                 timeout=300, env=_C_LOCALE)
+        out = checked.stdout + checked.stderr
+    except (OSError, subprocess.SubprocessError):
+        out = None
+    if _QKK_CACHE is not None:
+        _QKK_CACHE[owner] = out
+    return out
+
+
+def _qkk_said(owner, path):
+    """The lines of pacman -Qkk `owner` that are about `path`, or None when
+    pacman could not be run."""
+    out = _qkk(owner)
+    # A package without the file list pacman checks against vouches for
+    # nothing.
+    if out is None or re.search(rf"^{re.escape(owner)}: no mtree file$", out, re.M):
+        return None
+    return [l for l in out.splitlines() if f" {path} " in l]
+
+
 def _pacman_verifies(owner, target):
     """True when pacman -Qkk finds no mismatch for `target` in package
     `owner`."""
-    try:
-        checked = subprocess.run(["pacman", "-Qkk", owner], capture_output=True, text=True,
-                                 timeout=120)
-    except (OSError, subprocess.SubprocessError):
+    said = _qkk_said(owner, target)
+    if said is None:
         return False
-    # The same mismatches the scanner counts; a bare mtime mismatch is harmless.
-    bad = re.compile(r"checksum mismatch|Size mismatch|Symlink path mismatch|Permissions mismatch"
-                     r"|UID mismatch|GID mismatch")
-    for out_line in (checked.stdout + checked.stderr).splitlines():
-        if f" {target} " in out_line and (bad.search(out_line)
-                                          or "failed to calculate" in out_line):
-            return False
-    return True
+    return not any(_QKK_BAD.search(l) or "failed to calculate" in l for l in said)
+
+
+def _content_only(owner, path):
+    """True when everything pacman -Qkk says about `path` in package `owner`
+    is a checksum, size or time mismatch: its type, link target, mode and
+    owner are as packaged."""
+    said = _qkk_said(owner, path)
+    return said is not None and all(_QKK_CONTENT.search(l) for l in said)
 
 
 def scriptlet_link_explains(line):
@@ -408,26 +610,29 @@ def scriptlet_link_explains(line):
     calls scriptlet_link_target() through --scriptlet-link-target, so both
     use this one parser."""
     m = re.match(r"(?:added|changed) (\S+) \(unpackaged file in a system code path\)$", line)
-    if not m:
-        return False
-    path = m.group(1)
+    return bool(m and scriptlet_link_package(m.group(1)))
+
+
+def scriptlet_link_package(path):
+    """The package whose install script makes the symlink `path`, by the
+    rule in scriptlet_link_explains(), or None."""
     if not os.path.islink(path):
-        return False
+        return None
     target = os.path.realpath(path)
     if not os.path.isfile(target):
-        return False
+        return None
     owner = (_pacman("-Qqo", "--", target) or "").split("\n")[0].strip()
     version = (_pacman("-Q", "--", owner) or "").split() if owner else []
     if len(version) != 2:
-        return False
+        return None
     if not _pacman_verifies(owner, target):
-        return False
+        return None
     try:
         script = Path(f"/var/lib/pacman/local/{owner}-{version[1]}/install").read_text()
     except OSError:
-        return False
+        return None
     want = scriptlet_link_target(script, path)
-    return want is not None and want == target
+    return owner if want is not None and want == target else None
 
 
 _ASSIGN = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)=(.*)$", re.S)
@@ -622,16 +827,13 @@ def scriptlet_setgid(path):
     version = (_pacman("-Q", "--", owner) or "").split() if owner else []
     if len(version) != 2:
         return None
-    try:
-        checked = subprocess.run(["pacman", "-Qkk", owner], capture_output=True, text=True,
-                                 timeout=120)
-    except (OSError, subprocess.SubprocessError):
-        return None
     # Anything pacman says about the file but a group, mode or time mismatch
     # rules it out. Run as a user who cannot read the file, pacman prints
     # "failed to calculate SHA256 checksum" rather than a checksum mismatch,
     # so a list of bad messages to look for would let that through.
-    said = [l for l in (checked.stdout + checked.stderr).splitlines() if f" {path} " in l]
+    said = _qkk_said(owner, path)
+    if said is None:
+        return None
     if any(not re.search(r"\((?:GID|Permissions|Modification time) mismatch\)$", l)
            for l in said):
         return None
@@ -662,14 +864,16 @@ def _root_only(st):
     return st.st_uid == 0 and not st.st_mode & 0o022
 
 
-def listed_links(conf=SCAN_CONF):
-    """The SCRIPTLET_LINKS setting of scan.conf as {link path: package}.
+def _conf_pairs(conf, name, value_re):
+    """A scan.conf setting written as path=value pairs, as {path: value}.
 
     The value must be written out literally: a variable, command substitution
     or backslash anywhere in it, or a file that is not root's alone, gives an
-    empty list, so every link stays red. Entries that are not an absolute path,
-    an equals sign and a package name are skipped. The last assignment wins,
-    as it does when the file is sourced."""
+    empty list, so nothing is accepted. Entries that are not an absolute path,
+    an equals sign and a value matching `value_re` are skipped. The last
+    assignment wins, as it does when the file is sourced."""
+    if not conf:
+        return {}
     try:
         st = os.stat(conf)
         lines = Path(conf).read_text().splitlines()
@@ -679,7 +883,7 @@ def listed_links(conf=SCAN_CONF):
         return {}
     value, i = "", 0
     while i < len(lines):
-        m = re.match(r"\s*(?:export\s+)?SCRIPTLET_LINKS=(.*)$", lines[i])
+        m = re.match(rf"\s*(?:export\s+)?{name}=(.*)$", lines[i])
         i += 1
         if not m:
             continue
@@ -697,13 +901,20 @@ def listed_links(conf=SCAN_CONF):
         if len(words) > 1 or any(c in chunk for c in "$`\\"):
             return {}
         value = words[0] if words else ""
-    links = {}
+    pairs = {}
     for entry in value.split():
-        path, sep, pkg = entry.rpartition("=")
+        path, sep, val = entry.rpartition("=")
         if (sep and path.startswith("/") and os.path.normpath(path) == path
-                and re.fullmatch(r"[a-z0-9@_+][a-z0-9@._+-]*", pkg)):
-            links[path] = pkg
-    return links
+                and re.fullmatch(value_re, val)):
+            pairs[path] = val
+    return pairs
+
+
+def listed_links(conf=SCAN_CONF):
+    """The SCRIPTLET_LINKS setting of scan.conf as {link path: package}, read
+    by _conf_pairs(), so a value that is not written out literally lists
+    nothing and every link stays red."""
+    return _conf_pairs(conf, "SCRIPTLET_LINKS", r"[a-z0-9@_+][a-z0-9@._+-]*")
 
 
 def _ln_makes(script, link):
@@ -757,6 +968,820 @@ def listed_link_explains(line, links):
     that listed_link_package() accepts."""
     m = re.match(r"(?:added|changed) (\S+) \(unpackaged file in a system code path\)$", line)
     return bool(m and links and listed_link_package(m.group(1), links))
+
+
+# --- changes made while pacman ran --------------------------------------------
+#
+# A package's install script, a pacman hook, or a local hook of the
+# administrator's may write files that pacman cannot vouch for. Each rule
+# below accepts such a file only when its inode change time (ctime) falls
+# inside the moment pacman.log records that script or hook running. Unlike the
+# modification time, which `touch` can set to anything, the change time is
+# set by the kernel whenever the file or its metadata is written, so a file
+# edited later, or whose times were reset, falls outside the window and stays
+# red.
+
+PACMAN_HOOKS = "/etc/pacman.d/hooks"
+_ALPM_LINE = re.compile(r"^\[([^\]]+)\] \[ALPM\] (.*)$")
+_PKG_STEP = re.compile(r"(?:installed|upgraded|reinstalled|downgraded) (\S+) \((?:\S+ -> )?(\S+)\)$")
+_HOOK_RUN = re.compile(r"running '([^'/]+\.hook)'\.\.\.$")
+# The longest an install script is believed to run. A window is otherwise
+# closed by the next line pacman logs.
+_STEP_MAX = 1800
+
+
+@functools.lru_cache(maxsize=2)
+def _alpm_events(log):
+    """Every [ALPM] line of pacman.log as (epoch seconds, message), in order.
+    Scriptlet output ([ALPM-SCRIPTLET]) is not included."""
+    out = []
+    for line in log.splitlines():
+        m = _ALPM_LINE.match(line)
+        when = _stamp(m.group(1)) if m else None
+        if when:
+            out.append((when.timestamp(), m.group(2)))
+    return out
+
+
+def _pacman_log(log):
+    """`log`, or pacman.log read now when it is None."""
+    if log is not None:
+        return log
+    try:
+        return PACMAN_LOG.read_text(errors="replace")
+    except OSError:
+        return ""
+
+
+def _package_steps(events, ctime):
+    """(package, version) for each package install, upgrade, reinstall or
+    downgrade whose step in pacman.log spans `ctime`: from a second before
+    its line to two seconds after the next line pacman logged, which closes
+    it. pacman logs the step before it runs the install script, and its log
+    keeps whole seconds."""
+    found = []
+    for i, (when, msg) in enumerate(events):
+        m = _PKG_STEP.match(msg)
+        if not m:
+            continue
+        end = events[i + 1][0] if i + 1 < len(events) else when
+        end = min(end, when + _STEP_MAX)
+        if when - 1 <= ctime <= end + 2:
+            found.append((m.group(1), m.group(2)))
+    return found
+
+
+def _hook_ran(events, name_ok, ctime, seconds):
+    """True when pacman.log records a hook whose file name passes `name_ok`
+    starting at most `seconds` before `ctime`, and not after it."""
+    for when, msg in events:
+        m = _HOOK_RUN.match(msg)
+        if m and name_ok(m.group(1)) and when - 1 <= ctime <= when + seconds:
+            return True
+    return False
+
+
+def _brace_expand(word, limit=64):
+    """`word` with shell brace lists ({a,b}) expanded, at most `limit` words."""
+    m = re.search(r"\{([^{}]*,[^{}]*)\}", word)
+    if not m:
+        return [word]
+    out = []
+    for part in m.group(1).split(","):
+        out.extend(_brace_expand(word[:m.start()] + part + word[m.end():], limit))
+        if len(out) >= limit:
+            return out[:limit]
+    return out
+
+
+def _is_path(word, path):
+    """True when a literal shell word, after brace expansion, is `path`:
+    absolute, or relative to / as install scripts run there."""
+    for w in _brace_expand(word):
+        if not w or "$" in w or "`" in w:
+            continue
+        w = w[1:] if w.startswith("./") else w
+        if not w.startswith("/"):
+            w = "/" + w
+        if os.path.normpath(w) == path:
+            return True
+    return False
+
+
+def _script_lines(script):
+    """Each line of a script, continued lines joined, as its list of words
+    and operators, or None for a line the splitter cannot read."""
+    for line in re.sub(r"\\\n", " ", script).splitlines():
+        lex = shlex.shlex(line, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        lex.commenters = "#"
+        try:
+            yield line, list(lex)
+        except ValueError:
+            yield line, None
+
+
+def _script_names(script, path):
+    """True when an install script mentions `path` as a word of its own, in
+    any command, assignment or brace list. Comments do not count. This says
+    only that the script knows the file, not that it writes it."""
+    for line, words in _script_lines(script):
+        if words is None:
+            # A line the splitter cannot read still counts when it holds the
+            # path outside a comment.
+            if _names_exactly(line.split("#", 1)[0], path):
+                return True
+            continue
+        for word in words:
+            m = _ASSIGN.match(word)
+            if _is_path(m.group(2) if m else word, path):
+                return True
+    return False
+
+
+def _script_values(script):
+    """{NAME: value} for every variable an install script assigns one
+    unchanging value (NAME=value, or after local, export, readonly or
+    declare). A variable assigned two different values is None."""
+    values = {}
+    for _, words in _script_lines(script):
+        for i, word in enumerate(words or []):
+            if i and words[i - 1] not in ("local", "export", "readonly", "declare", ";", "&&",
+                                          "||", "then", "do", "{", "(") and i != 0:
+                continue
+            m = _ASSIGN.match(word)
+            if m:
+                name, value = m.groups()
+                values[name] = value if values.get(name, value) == value else None
+    return values
+
+
+def _resolve(word, values, depth=0):
+    """A shell word as the literal it stands for: itself when it has no
+    expansion, the value of a plain "$NAME" or "${NAME}", or the default of a
+    positional "${1:-WORD}". Anything else is None."""
+    if depth > 5 or word is None:
+        return None
+    if not any(c in word for c in "$`"):
+        return word
+    m = re.fullmatch(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})", word)
+    if m:
+        return _resolve(values.get(m.group(1) or m.group(2)), values, depth + 1)
+    m = re.fullmatch(r"\$\{[0-9]:?-(.*)\}", word)
+    if m:
+        return _resolve(m.group(1), values, depth + 1)
+    return None
+
+
+# Commands whose last operand is the file they write, and commands that
+# write every file they are given.
+_WRITE_LAST = {"cp", "mv", "install", "ln"}
+_WRITE_ALL = {"touch", "tee", "truncate"}
+_REDIRECT = {">", ">>", ">|", "&>", "&>>"}
+
+
+def _script_writes(script, path):
+    """True when an install script writes `path`: as the target of a
+    redirection (>, >>), the last operand of cp, mv, install or ln, an
+    operand of touch, tee or truncate, a file edited by sed -i, or dd's of=.
+    The word may be a literal, or a variable the script gives one literal
+    value (see _resolve). A path the script only removes, tests or passes
+    to some other program does not count."""
+    values = _script_values(script)
+
+    def hit(word):
+        return _is_path(_resolve(word, values) or "", path)
+
+    for _, tokens in _script_lines(script):
+        if tokens is None:
+            continue
+        words = []
+        for i, tok in enumerate(tokens + [";"]):
+            if tok in _REDIRECT and i + 1 < len(tokens) and hit(tokens[i + 1]):
+                return True
+            if tok and all(c in "();<>|&" for c in tok):
+                while words and words[0] in _LN_LEAD:
+                    words.pop(0)
+                if words and _command_writes(words, hit):
+                    return True
+                words = []
+            elif not (i and tokens[i - 1] in _REDIRECT):
+                words.append(tok)
+    return False
+
+
+def _command_writes(words, hit):
+    cmd, args = words[0].rsplit("/", 1)[-1], words[1:]
+    operands = [a for a in args if not a.startswith("-")]
+    if cmd in _WRITE_LAST:
+        if cmd == "install" and ("-d" in args or "--directory" in args):
+            return any(hit(a) for a in operands)
+        return len(operands) >= 2 and hit(operands[-1])
+    if cmd in _WRITE_ALL:
+        return any(hit(a) for a in operands)
+    if cmd == "sed" and any(a == "--in-place" or re.fullmatch(r"-[a-zA-Z]*i\S*", a) for a in args):
+        scripted = any(a in ("-e", "-f") or a.startswith(("--expression", "--file")) for a in args)
+        return any(hit(a) for a in (operands if scripted else operands[1:]))
+    if cmd == "dd":
+        return any(a.startswith("of=") and hit(a[3:]) for a in args)
+    return False
+
+
+def _install_script(pkg, version):
+    try:
+        return Path(f"/var/lib/pacman/local/{pkg}-{version}/install").read_text()
+    except (OSError, UnicodeDecodeError):
+        return None
+
+
+def prefetch_owners(paths):
+    """Asks pacman who owns each of `paths`, and each symlink's target, in
+    one call, and keeps the answers for _owner_of(). The paths go on standard
+    input, never the command line."""
+    if _PACMAN_CACHE is None:
+        return
+    want = set()
+    for path in paths:
+        if path.startswith("/") and not _UNSAFE_CHARS.search(path) and "\t" not in path:
+            want.add(path)
+            if os.path.islink(path):
+                want.add(os.path.realpath(path))
+    want = sorted(p for p in want if ("-Qqo", "--", p) not in _PACMAN_CACHE)
+    if not want:
+        return
+    try:
+        r = subprocess.run([_tool("pacman"), "-Qo", "-"], input="".join(f"{p}\n" for p in want),
+                           capture_output=True, text=True, timeout=120, env=_C_LOCALE)
+    except (OSError, subprocess.SubprocessError):
+        return
+    # pacman prints the path with its parent folder resolved, so an answer
+    # is kept only for a path it prints exactly as asked, or names in "No
+    # package owns". Any other path is left to a -Qqo of its own.
+    owners, unowned = {}, set()
+    for line in r.stdout.splitlines():
+        m = re.match(r"(.*) is owned by (\S+) \S+$", line)
+        if m:
+            owners.setdefault(m.group(1), []).append(m.group(2))
+    for line in r.stderr.splitlines():
+        m = re.match(r"error: No package owns (.*)$", line)
+        if m:
+            unowned.add(m.group(1))
+    for p in want:
+        if p in owners:
+            _PACMAN_CACHE[("-Qqo", "--", p)] = "".join(f"{o}\n" for o in owners[p])
+        elif p in unowned:
+            _PACMAN_CACHE[("-Qqo", "--", p)] = None
+
+
+def _owner_of(path):
+    """The first package that owns `path`, or "" when none does."""
+    return (_pacman("-Qqo", "--", path) or "").split("\n")[0].strip()
+
+
+PKG, MAYBE = "PKG", "AMBER"
+
+
+def scriptlet_wrote(path, owner=None, log=None):
+    """(package, grade) when `path` was written by that package's own install
+    script, or None. grade is PKG when the script has a command that writes
+    the path, AMBER when the script only names it (graphviz removes
+    usr/lib/graphviz/config8 and has `dot -c` write it again).
+
+    Some install scripts write files pacman cannot vouch for: graphviz's
+    plugin list, a voice typing tool's link /usr/bin/<name> to the build for
+    this CPU, 1password's polkit policy, edited with sed on every upgrade.
+    All of these must hold:
+
+    - the file, or the symlink itself, was last changed while pacman.log shows
+      that package being installed or upgraded, to the version installed now;
+    - that version's install script writes or names the file's exact path;
+    - with `owner` given (a file the package owns that fails pacman's
+      checksum), pacman reports nothing for it but a content, size or time
+      mismatch, so its type, mode and owner are as packaged;
+    - without `owner` (a file no package owns), no package owns it now, and a
+      symlink must point at a file of that same package that pacman verifies.
+
+    Limit: the content of such a file cannot be checked against anything. The
+    change time (ctime) is set by the kernel and cannot be set back without
+    changing the clock, so the file was written while the package's step ran,
+    but a program already running as root could write it in that moment
+    too. A file changed at any other moment stays red."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not (stat.S_ISREG(st.st_mode) or stat.S_ISLNK(st.st_mode)):
+        return None
+    events = _alpm_events(_pacman_log(log))
+    for pkg, version in _package_steps(events, st.st_ctime):
+        if owner is not None and pkg != owner:
+            continue
+        if (_pacman("-Q", "--", pkg) or "").split() != [pkg, version]:
+            continue
+        script = _install_script(pkg, version)
+        if script is None:
+            continue
+        grade = PKG if _script_writes(script, path) else MAYBE if _script_names(script, path) else None
+        if grade is None:
+            continue
+        if owner is not None:
+            if _owner_of(path) != owner or not _content_only(owner, path):
+                continue
+        else:
+            if _owner_of(path):
+                continue
+            if stat.S_ISLNK(st.st_mode):
+                target = os.path.realpath(path)
+                if (not os.path.isfile(target) or _owner_of(target) != pkg
+                        or not _pacman_verifies(pkg, target)):
+                    continue
+        return pkg, grade
+    return None
+
+
+_HASHES = r"[0-9a-f]{64}(?:,[0-9a-f]{64})*"
+
+
+def hook_patched_entries(conf=SCAN_CONF):
+    """The HOOK_PATCHED setting of scan.conf as {file path: (hook file name,
+    set of SHA-256 sums)}: package files that a pacman hook of this
+    machine's own, in /etc/pacman.d/hooks, deliberately patches after each
+    upgrade, written as path=name.hook:sha256[,sha256...]. The sums are those
+    of the file as patched; an entry without one is skipped. Read by
+    _conf_pairs(), so only a literal value counts."""
+    pairs = _conf_pairs(conf, "HOOK_PATCHED",
+                        rf"[A-Za-z0-9@_+][A-Za-z0-9@._+-]*\.hook:{_HASHES}")
+    return {path: (v.split(":")[0], set(v.split(":")[1].split(","))) for path, v in pairs.items()}
+
+
+def _sha256(path):
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+    except OSError:
+        return None
+    return h.hexdigest()
+
+
+def hook_patched(path, owner, conf=SCAN_CONF, log=None):
+    """The package of a file listed in HOOK_PATCHED whose checksum failure
+    the listed hook explains, or None. All of these must hold: the file is
+    listed with that hook; its content is one of the listed SHA-256 sums; the
+    hook file is in /etc/pacman.d/hooks, a regular file owned by root that no
+    one else may write; the file is a regular file `owner` owns, and pacman
+    reports nothing for it but a content, size or time mismatch; and the
+    file was last changed within a minute of pacman.log recording that hook
+    running. A patch applied any other way, other content, or a later edit
+    stays red. When the package changes the file upstream, the patched file
+    changes too and stays red until its new sum is listed."""
+    hook, sums = hook_patched_entries(conf).get(path, (None, set()))
+    if not hook:
+        return None
+    try:
+        hst = os.lstat(os.path.join(PACMAN_HOOKS, hook))
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(hst.st_mode) or not _root_only(hst) or not stat.S_ISREG(st.st_mode):
+        return None
+    if _sha256(path) not in sums:
+        return None
+    if _owner_of(path) != owner or not _content_only(owner, path):
+        return None
+    events = _alpm_events(_pacman_log(log))
+    return owner if _hook_ran(events, lambda name: name == hook, st.st_ctime, 60) else None
+
+
+_MODULE_INDEX = re.compile(r"/usr/lib/modules/([A-Za-z0-9][A-Za-z0-9._+-]*)/(modules\.[A-Za-z0-9_.]+)")
+# The files depmod writes. modules.builtin, modules.order and
+# modules.builtin.modinfo come with the kernel package.
+DEPMOD_FILES = ("modules.alias", "modules.alias.bin", "modules.builtin.alias.bin",
+                "modules.builtin.bin", "modules.dep", "modules.dep.bin", "modules.devname",
+                "modules.softdep", "modules.symbols", "modules.symbols.bin", "modules.weakdep")
+MODULES = "/usr/lib/modules"
+_DEPMOD_SUMS = {}
+
+
+def _depmod_sums(version):
+    """{file name: SHA-256} of the index depmod builds now for kernel
+    `version`, or None. It runs in a temporary folder that links to every
+    entry of the real module folder except depmod's own files, so nothing on
+    the system is written. Built once per version and run."""
+    if version in _DEPMOD_SUMS:
+        return _DEPMOD_SUMS[version]
+    sums = None
+    src = os.path.join(MODULES, version)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = os.path.join(tmp, "lib/modules", version)
+            os.makedirs(dest)
+            for name in os.listdir(src):
+                if name not in DEPMOD_FILES:
+                    os.symlink(os.path.join(src, name), os.path.join(dest, name))
+            r = subprocess.run([_tool("depmod"), "-b", tmp, version], capture_output=True,
+                               timeout=300, env=_C_LOCALE)
+            if r.returncode == 0:
+                sums = {n: _sha256(os.path.join(dest, n)) for n in DEPMOD_FILES
+                        if os.path.isfile(os.path.join(dest, n))}
+    except (OSError, subprocess.SubprocessError):
+        sums = None
+    _DEPMOD_SUMS[version] = sums
+    return sums
+
+
+def depmod_rebuilt(path, log=None):
+    """The package of the kernel whose module index `path` is, when the file
+    holds exactly what depmod builds from the modules installed now, or None.
+    depmod writes modules.dep, modules.alias and the rest into
+    /usr/lib/modules/<version>/ after every kernel or module change, and no
+    package owns them. The file must be a regular file directly in a module
+    folder that an installed package owns, and byte for byte what depmod
+    writes when run again into a temporary folder. The modules themselves are
+    checked as package files. `log` is unused and kept for the callers."""
+    m = _MODULE_INDEX.fullmatch(path)
+    if not m or m.group(2) not in DEPMOD_FILES:
+        return None
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode):
+        return None
+    kernel = _owner_of(f"{MODULES}/{m.group(1)}/")
+    if not kernel:
+        return None
+    sums = _depmod_sums(m.group(1))
+    if not sums or sums.get(m.group(2)) is None or sums[m.group(2)] != _sha256(path):
+        return None
+    return kernel
+
+
+def old_kernel_modules(version):
+    """True when /usr/lib/modules/<version> is the module folder of a kernel
+    that is no longer installed: the folder is gone, no installed package
+    owns it, and it is not the running kernel's. A kernel upgrade keeps the
+    running kernel's modules until the next boot (kernel-modules-hook), so its
+    files are deleted later, outside any pacman run. Removing modules of a
+    kernel that cannot boot adds no code to the machine."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", version) or version == os.uname().release:
+        return False
+    folder = f"/usr/lib/modules/{version}"
+    if os.path.lexists(folder):
+        return False
+    # pacman exits 1 for a path no package owns, which _pacman reads as None.
+    return _pacman("-Qqo", "--", folder + "/") is None
+
+
+MOUNTINFO = "/proc/self/mountinfo"
+# File systems that keep no Unix mode or owner: every file gets those the
+# mount options give it.
+NO_UNIX_MODES = {"vfat", "msdos", "exfat", "ntfs", "ntfs3"}
+
+
+def _mount_of(path):
+    """(mount point, file system type, super options as a dict) of the mount
+    `path` is on, by the longest mount point that holds it, or None. Of
+    mounts stacked on one mount point, the last listed is the one in use."""
+    best = None
+    try:
+        lines = Path(MOUNTINFO).read_text().splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        left, sep, right = line.partition(" - ")
+        fields, rest = left.split(), right.split()
+        if not sep or len(fields) < 5 or len(rest) < 3:
+            continue
+        point = fields[4].replace("\\040", " ")
+        inside = path == point or path.startswith(point.rstrip("/") + "/")
+        if inside and (best is None or len(point) >= len(best[0])):
+            opts = dict(o.partition("=")[::2] for o in rest[2].split(","))
+            best = (point, rest[0], opts)
+    return best
+
+
+def _packaged(owner, path):
+    """The mode, uid and gid the package gives `path`, from its mtree file,
+    or None."""
+    version = (_pacman("-Q", "--", owner) or "").split()
+    if len(version) != 2:
+        return None
+    entry = _mtree_entry(owner, version[1], path)
+    try:
+        return (int(entry["mode"], 8), int(entry.get("uid", "0")), int(entry.get("gid", "0")))
+    except (TypeError, KeyError, ValueError):
+        return None
+
+
+def mount_mode_explains(path, owner):
+    """The package of a file on a file system without Unix modes (FAT, exFAT,
+    NTFS) whose only faults are a mode, owner or group that the mount gives
+    every file, or None. /boot is often FAT with fmask=0077, so each packaged
+    file there is 0700 root and pacman reports a permissions mismatch for it
+    after every upgrade. pacman must report nothing else for the file, its
+    content included; the file's mode, owner and group must be exactly what
+    the mount options give a file (fmask, or umask) or a folder (dmask, or
+    umask), uid and gid; and those must be safe: owned by root, in group root
+    or the packaged group, writable by no group or other, and with no
+    permission the package does not give, apart from the execute bits FAT
+    gives every file. A mount that hands the files to a user, or makes them
+    writable by others, stays red."""
+    mount = _mount_of(path)
+    if not mount or mount[1] not in NO_UNIX_MODES:
+        return None
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    opts = mount[2]
+    if stat.S_ISDIR(st.st_mode):
+        mask = opts.get("dmask", opts.get("umask", "022"))
+    elif stat.S_ISREG(st.st_mode):
+        mask = opts.get("fmask", opts.get("umask", "022"))
+    else:
+        return None
+    try:
+        want_mode = 0o777 & ~int(mask, 8)
+        want_uid, want_gid = int(opts.get("uid", "0")), int(opts.get("gid", "0"))
+    except ValueError:
+        return None
+    mode = stat.S_IMODE(st.st_mode)
+    if (mode != want_mode or st.st_uid != want_uid or st.st_gid != want_gid
+            or _owner_of(path) != owner):
+        return None
+    packaged = _packaged(owner, path)
+    if packaged is None:
+        return None
+    if (st.st_uid != 0 or st.st_gid not in (0, packaged[2]) or mode & 0o022
+            or mode & ~(packaged[0] | 0o111) & 0o7777):
+        return None
+    said = _qkk_said(owner, path)
+    ok = re.compile(r"\((?:Permissions|UID|GID|Modification time) mismatch\)$")
+    if said is None or not all(ok.search(l) for l in said):
+        return None
+    return owner
+
+
+def _backup_files(owner):
+    """The paths package `owner` lists as backup files (configuration it
+    keeps across upgrades), from the %BACKUP% section of its entry in
+    pacman's local database."""
+    version = (_pacman("-Q", "--", owner) or "").split()
+    if len(version) != 2:
+        return set()
+    try:
+        text = Path(f"/var/lib/pacman/local/{owner}-{version[1]}/files").read_text()
+    except (OSError, UnicodeDecodeError):
+        return set()
+    m = re.search(r"^%BACKUP%\n(.*?)(?:\n\n|\Z)", text, re.M | re.S)
+    return {"/" + line.split("\t")[0] for line in m.group(1).splitlines()} if m else set()
+
+
+def config_mode_tightened(path, owner):
+    """The package of a configuration file it keeps across upgrades (a backup
+    file) whose only faults are a mode that only takes permissions away from
+    the packaged one and, maybe, another group, or None. cupsd rewrites
+    printers.conf 0600 root:cups, which may hold passwords. The file must
+    still be owned by root. Any permission the package does not give, or
+    another owner, stays red. Graded amber, like an edited configuration
+    file. pacman 7 marks only a backup file's content, size and time
+    messages "backup file:"; a mode or group mismatch is a plain "warning:",
+    so the backup list comes from pacman's database."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != 0 or _owner_of(path) != owner:
+        return None
+    if path not in _backup_files(owner):
+        return None
+    packaged = _packaged(owner, path)
+    if packaged is None or stat.S_IMODE(st.st_mode) & ~packaged[0] & 0o7777:
+        return None
+    said = _qkk_said(owner, path)
+    ok = re.compile(r"^(?:warning|backup file): .*\((?:Permissions|GID|Modification time) mismatch\)$")
+    if not said or not all(ok.search(l) for l in said):
+        return None
+    return owner
+
+
+# Caches that a pacman hook rebuilds whenever a package adds to them. No
+# package owns them. Each is explained only when it is byte for byte what its
+# tool builds now, run as this user into a temporary folder.
+# GIO's own module cache and GTK 4's.
+GIO_CACHE = re.compile(r"/usr/lib/gio/modules/giomodule\.cache|/usr/lib/gtk-4\.0/4\.0\.0/[^/]+/giomodule\.cache")
+
+
+def _links_to(src, tmp, keep):
+    """Links in `tmp` to every entry of folder `src` for which `keep` is
+    true."""
+    for name in os.listdir(src):
+        if keep(name):
+            os.symlink(os.path.join(src, name), os.path.join(tmp, name))
+
+
+def _cache_now(path):
+    """The bytes the cache's own tool builds now for `path`, or None."""
+    run_ = lambda cmd: subprocess.run(cmd, capture_output=True, timeout=120, env=_C_LOCALE)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            if path == "/usr/lib/gconv/gconv-modules.cache":
+                out = os.path.join(tmp, "gconv-modules.cache")
+                if run_([_tool("iconvconfig"), "-o", out]).returncode == 0:
+                    return Path(out).read_bytes()
+            elif path == "/usr/lib32/gconv/gconv-modules.cache":
+                # As lib32-glibc's pacman hook runs it.
+                out = os.path.join(tmp, "gconv-modules.cache")
+                if run_([_tool("iconvconfig"), "--nostdlib", f"--output={out}",
+                         "/usr/lib32/gconv"]).returncode == 0:
+                    return Path(out).read_bytes()
+            elif path == "/usr/lib/udev/hwdb.bin":
+                # systemd-hwdb follows links inside its --root, so the sources
+                # are copied, not linked: every folder it reads them from.
+                for folder in HWDB_SOURCES:
+                    dest = os.path.join(tmp, folder.lstrip("/"))
+                    os.makedirs(dest)
+                    if os.path.isdir(folder):
+                        for name in os.listdir(folder):
+                            src = os.path.join(folder, name)
+                            if name.endswith(".hwdb") and os.path.isfile(src):
+                                shutil.copyfile(src, os.path.join(dest, name))
+                if run_([_tool("systemd-hwdb"), f"--root={tmp}/", "--usr", "update"]).returncode == 0:
+                    return Path(tmp, "usr/lib/udev/hwdb.bin").read_bytes()
+            elif path == "/usr/lib/gtk-3.0/3.0.0/immodules.cache":
+                # Run by its full path, as the pacman hook does: the tool
+                # writes how it was called into the cache.
+                r = run_([_tool("gtk-query-immodules-3.0")])
+                if r.returncode == 0:
+                    # On standard output it ends with one more new line.
+                    return r.stdout[:-1] if r.stdout.endswith(b"\n\n") else r.stdout
+            elif path == "/usr/share/applications/mimeinfo.cache":
+                _links_to(os.path.dirname(path), tmp, lambda n: n != "mimeinfo.cache")
+                if run_([_tool("update-desktop-database"), tmp]).returncode == 0:
+                    return Path(tmp, "mimeinfo.cache").read_bytes()
+            elif GIO_CACHE.fullmatch(path):
+                _links_to(os.path.dirname(path), tmp, lambda n: n.endswith(".so"))
+                if run_([_tool("gio-querymodules"), tmp]).returncode == 0:
+                    return Path(tmp, "giomodule.cache").read_bytes()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return None
+
+
+# Where systemd-hwdb reads its sources.
+HWDB_SOURCES = ("/etc/udev/hwdb.d", "/run/udev/hwdb.d", "/usr/local/lib/udev/hwdb.d",
+                "/usr/lib/udev/hwdb.d")
+REBUILT_BY = {
+    "/usr/lib/gconv/gconv-modules.cache": "iconvconfig",
+    "/usr/lib32/gconv/gconv-modules.cache": "iconvconfig",
+    "/usr/lib/udev/hwdb.bin": "systemd-hwdb",
+    "/usr/lib/gtk-3.0/3.0.0/immodules.cache": "gtk-query-immodules-3.0",
+    "/usr/share/applications/mimeinfo.cache": "update-desktop-database",
+}
+
+
+def rebuilt_by_hook(path, log=None):
+    """The tool that builds the cache at `path` (glibc's and lib32-glibc's gconv
+    modules, systemd's hardware database, GTK 3
+    input methods, the desktop MIME cache, a GTK 4 GIO module cache), when
+    the file is a regular file and byte for byte what that tool builds now,
+    or None. Their pacman hooks run those tools after every change to what
+    the caches list. `log` is unused and kept for the callers."""
+    tool = REBUILT_BY.get(path) or ("gio-querymodules" if GIO_CACHE.fullmatch(path) else None)
+    if tool is None:
+        return None
+    try:
+        st = os.lstat(path)
+        data = Path(path).read_bytes() if stat.S_ISREG(st.st_mode) else None
+    except OSError:
+        return None
+    return tool if data is not None and data == _cache_now(path) else None
+
+
+def explain_changes(records, conf, log):
+    """For security-scan: the explanations above, for many files in one run.
+    `records` are (owner, path) pairs; owner is "" for a file no package
+    owns, else the package whose checksum the file fails. Yields (path,
+    grade, reason) for each file one of them explains, grade PKG or AMBER,
+    with the reason worded for the AIDE log."""
+    links = listed_links(conf) if conf else {}
+    for owner, path in records:
+        if owner:
+            pkg = config_mode_tightened(path, owner)
+            if pkg:
+                yield path, MAYBE, f"config file of {pkg}, permissions changed locally"
+                continue
+            pkg = mount_mode_explains(path, owner)
+            if pkg:
+                yield path, PKG, (f"{pkg}, verified by pacman; its mode and owner are those the "
+                                  f"{_mount_of(path)[1]} file system gives every file")
+                continue
+            pkg = hook_patched(path, owner, conf, log)
+            if pkg:
+                yield path, PKG, f"{pkg}, patched by this machine's own hook as listed in scan.conf"
+                continue
+            found = scriptlet_wrote(path, owner, log)
+            if found and found[1] == PKG:
+                yield path, PKG, f"{found[0]}, edited by its own install script while pacman installed it"
+            elif found:
+                yield path, MAYBE, (f"{found[0]}, changed while its install script ran, which names "
+                                    "the file but has no command that writes it; confirm")
+            continue
+        tool = rebuilt_by_hook(path, log)
+        if tool:
+            yield path, PKG, f"cache the same as {tool} builds it now"
+            continue
+        pkg = scriptlet_link_package(path)
+        if pkg:
+            yield path, PKG, (f"link made by {pkg}'s install script, to the file it names, "
+                              "which pacman verifies")
+            continue
+        pkg = listed_link_package(path, links)
+        if pkg:
+            yield path, PKG, (f"link listed in scan.conf for {pkg}, made by its install script, "
+                              "to a file pacman verifies")
+            continue
+        pkg = depmod_rebuilt(path, log)
+        if pkg:
+            yield path, PKG, f"module index for {pkg}, the same as depmod builds it now"
+            continue
+        found = scriptlet_wrote(path, None, log)
+        if found and found[1] == PKG:
+            yield path, PKG, f"written by {found[0]}'s install script while pacman installed it"
+        elif found:
+            yield path, MAYBE, (f"written while {found[0]}'s install script ran, which names the "
+                                "file but has no command that writes it; confirm")
+
+
+def owned_all_along(path, when):
+    """True when a file logged as unpackaged by the run that started at
+    `when` is a package's file that pacman verifies now, and has not changed
+    since before that run, so the run saw this same file. Before 0.2.12 the
+    scan asked pacman about each file while a package update could be
+    replacing pacman's own libraries; pacman then failed, and its files read
+    as unpackaged. pacman cannot take over a file that is already there
+    without replacing it, which would have changed it."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    if st.st_ctime >= when.timestamp():
+        return False
+    owner = _owner_of(path)
+    return bool(owner) and _pacman_verifies(owner, path)
+
+
+def unchanged_since(path, until):
+    """True when `path` (or the symlink itself) last changed before `until`,
+    the start of the run that logged it, so a re-check today looks at what
+    that run saw rather than at a file written since, or while it ran."""
+    try:
+        return os.lstat(path).st_ctime < until.timestamp()
+    except OSError:
+        return False
+
+
+def unpackaged_explains(line, links, log, when=None, until=None, current=False):
+    """The grade (PKG or AMBER) a RED line earns now from the rules above, or
+    None. `when` and `until` are the start and end of the run that logged it.
+    The file must not have changed since that run ended; a file written since
+    is not what the run saw. A line from a run that already used these rules
+    (`current`) is only re-checked against scan.conf, whose lists the
+    administrator may have added to since."""
+    m = re.match(r"(?:added|changed) (\S+) \(unpackaged file in a system code path\)$", line)
+    if m:
+        path = m.group(1)
+        if current or until is None or not unchanged_since(path, until):
+            return None
+        if when is not None and owned_all_along(path, when):
+            return PKG
+        if rebuilt_by_hook(path, log) or depmod_rebuilt(path, log):
+            return PKG
+        found = scriptlet_wrote(path, None, log)
+        return found[1] if found else None
+    m = re.match(r"(?:added|changed) (\S+) \(owned by (\S+) but fails pacman's ownership or "
+                 r"permission check\)$", line)
+    if m:
+        path, owner = m.groups()
+        if current or until is None or not unchanged_since(path, until):
+            return None
+        return PKG if mount_mode_explains(path, owner) else None
+    m = re.match(r"changed (\S+) \(owned by (\S+) but fails pacman's checksum\)$", line)
+    if m:
+        path, owner = m.groups()
+        if until is None or not unchanged_since(path, until):
+            return None
+        if hook_patched(path, owner, SCAN_CONF, log):
+            return PKG
+        if current:
+            return None
+        found = scriptlet_wrote(path, owner, log)
+        return found[1] if found else None
+    return None
+
+
 # limine-snapper-sync keeps a "Snapshots" sub-menu in limine.conf and its own
 # record of it in limine_history/snapshots.json, and rewrites both whenever
 # snapper creates or removes a snapshot, with or without a package update.
@@ -932,7 +1957,7 @@ def _limine_sync_wrote(path, since):
     want = f"{'Updated' if target == LIMINE_CONF else 'Saved'}: {target}"
     try:
         mtime = os.stat(path).st_mtime
-        r = subprocess.run(["journalctl", "-q", "-o", "json", "--output-fields=MESSAGE",
+        r = subprocess.run([_tool("journalctl"), "-q", "-o", "json", "--output-fields=MESSAGE",
                             f"--since=@{int(since)}", f"_EXE={LIMINE_SYNC_EXE}"],
                            capture_output=True, text=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
@@ -1040,6 +2065,25 @@ def boot_explained_by_pacman(when, path, runs, log=None):
     return pacman_changed(start, end, log)
 
 
+# security-scan logs "graded by security-scan rules N" in each AIDE log since
+# 0.2.12, for the version of the rules it graded with.
+RULES_VERSION = 2
+RULES_LINE = re.compile(r"^graded by security-scan rules (\d+)$", re.M)
+
+
+def recheck(line, links, log, when, until, current):
+    """The grade a RED line earns now (PKG or AMBER), or None to keep it red.
+    See unpackaged_explains() for the conditions."""
+    path = line.split(" ", 2)[1] if line.count(" ") >= 2 else ""
+    if until is None or not path.startswith("/") or not unchanged_since(path, until):
+        return None
+    if listed_link_explains(line, links):
+        return PKG
+    if not current and (hook_explains(line) or scriptlet_link_explains(line)):
+        return PKG
+    return unpackaged_explains(line, links, log, when, until, current)
+
+
 def integrity(now, since):
     s = Section("System file integrity (AIDE)", GREEN, "")
     recent, _ = logs("aide", since)
@@ -1050,8 +2094,25 @@ def integrity(now, since):
     links = listed_links()
     runs, _ = logs("aide", dt.datetime.min)
     pacman_log = None
+    old_kernels = {}
+    # One pacman call for the owners of every red file in logs from before
+    # these rules, which are the ones re-checked below.
+    prefetch_owners(re.findall(r"^RED (?:added|changed) (\S+) ", "".join(
+        t for t in (read(p) for _, p in recent)
+        if not (RULES_LINE.search(t) and int(RULES_LINE.search(t).group(1)) >= RULES_VERSION)),
+        re.M))
     for when, p in recent:
-        for line in read(p).splitlines():
+        text = read(p)
+        # A run that logged the rules version it graded with already applied
+        # every rule below; only scan.conf's lists, which the administrator
+        # may have added to since, are applied to its red lines again. A
+        # file is re-checked only if it has not changed since the run ended.
+        m = RULES_LINE.search(text)
+        current = bool(m) and int(m.group(1)) >= RULES_VERSION
+        # A file written after the run started may not be what AIDE read,
+        # so a re-check only looks at files unchanged since the start.
+        until = when
+        for line in text.splitlines():
             if line.startswith("RED ") and line.endswith(BOOT_NO_PACKAGE):
                 if pacman_log is None:
                     try:
@@ -1064,16 +2125,29 @@ def integrity(now, since):
             # A red limine.conf or snapshots.json line is not re-read with
             # limine_snapshot_change: the report cannot read /boot or the
             # trusted copy, and neither is what it was when the line was logged.
-            if line.startswith("RED ") and (hook_explains(line[4:])
-                                            or scriptlet_link_explains(line[4:])
-                                            or listed_link_explains(line[4:], links)):
-                pkg += 1
-            elif line.startswith("RED "):
-                reds.append((when, line[4:]))
+            if line.startswith("RED "):
+                grade = recheck(line[4:], links, pacman_log, when, until, current)
+                if grade == PKG:
+                    pkg += 1
+                elif grade == MAYBE:
+                    ambers.append((when, line[4:]))
+                else:
+                    reds.append((when, line[4:]))
             elif line.startswith("AMBER "):
+                # Modules of a kernel that is gone, logged one by one before
+                # the scan summarised them.
+                m = re.match(r"AMBER removed /usr/lib/modules/([^/ ]+)(?:/| \()", line)
+                if m and m.group(1) not in old_kernels:
+                    old_kernels[m.group(1)] = old_kernel_modules(m.group(1))
+                if m and old_kernels[m.group(1)]:
+                    pkg += 1
+                    continue
                 ambers.append((when, line[6:]))
             elif line.startswith("PKG "):
-                pkg += 1
+                # The scan logs a removed kernel's modules as one line that
+                # counts them.
+                m = re.match(r"PKG removed /usr/lib/modules/\S+ \((\d+) entries, ", line)
+                pkg += int(m.group(1)) if m else 1
     for when, line in reds:
         s.add(RED, line, when.strftime("%a %d %b"),
               "A system file changed outside any package update. Do not ignore: compare with "
@@ -1112,12 +2186,13 @@ def rootkit(now, since):
     # the week's runs would keep a cleared warning red for up to seven days.
     when, p = recent[-1]
     text = read(p)
-    m = re.search(r"summary: (\d+) warning", text)
+    # Only the scan's own summary line, never text rkhunter printed.
+    m = re.match(r"(\d+) warning", summary(text) or "")
     warned = int(m.group(1)) if m else 0
     if warned:
         # A "properties changed" warning whose files pacman verified was
         # accepted by the scanner; only its UNVERIFIED files still count.
-        found = [w for w in re.findall(r"^Warning: (.*)$", text, re.M)
+        found = [w for w in re.findall(r"^(?:\| )?Warning: (.*)$", text, re.M)
                  if "file properties have changed" not in w]
         found += [f"File changed and pacman cannot vouch for it: {f}"
                   for f in re.findall(r"^UNVERIFIED (.*)$", text, re.M)]
@@ -1126,7 +2201,7 @@ def rootkit(now, since):
                   "Investigate before anything else. If it is a new false positive, "
                   "verify with pacman -Qkk and add it to /etc/rkhunter.conf.local.")
     earlier = sum(1 for _, q in recent[:-1]
-                  if re.search(r"summary: [1-9]\d* warning", read(q)))
+                  if re.match(r"[1-9]\d* warning", summary(read(q)) or ""))
     cleared = (f" {earlier} earlier run(s) this period had warnings that this run no longer shows."
                if earlier and not warned else "")
     s.headline = (f"{warned} warning(s) in the latest check." if warned
@@ -1143,7 +2218,9 @@ def models(now, since):
     dangerous = suspicious = 0
     for when, p in recent:
         text = read(p)
-        for line in re.findall(r"^(.*(?:dangerous|suspicious) import.*)$", text, re.M):
+        # Tool output is logged with "| " in front since 0.2.12; the finding
+        # is shown without it.
+        for line in re.findall(r"^(?:\| )?(.*(?:dangerous|suspicious) import.*)$", text, re.M):
             bad = "dangerous" in line
             dangerous += bad
             suspicious += not bad
@@ -1214,9 +2291,9 @@ def hardening(now, since):
         s.rating, s.headline = AMBER, "No lynis audit yet."
         return s
     text = read(latest[1])
-    m = re.search(r"hardening index (\d+)", text)
+    m = re.match(r"hardening index (\d+)", summary(text) or "")
     index = int(m.group(1)) if m else None
-    warns = re.findall(r"^warning\[\]=([^|]+)\|([^|]+)", text, re.M)
+    warns = re.findall(r"^(?:\| )?warning\[\]=([^|]+)\|([^|]+)", text, re.M)
     for wid, msg in warns:
         # lynis flags any arch-audit output, which the package section
         # already grades properly.
@@ -1530,8 +2607,12 @@ def write_private(path, text):
 
 
 def run(cmd):
+    """A program's output, run by its full path in SAFE_ENV, or "" when it
+    fails."""
+    cmd = [cmd[0] if cmd[0].startswith("/") else _tool(cmd[0]), *cmd[1:]]
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=20,
+                              env=SAFE_ENV).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -1577,8 +2658,8 @@ def text_report(sections, overall, start, end, colour, show_all=False):
     out = [bold(f"Security report, {start:%a %d %b} to {end:%a %d %b %Y}"),
            f"Overall: {c(overall, DOT[overall] + ' ' + LABEL[overall])}. {overall_line(overall, sections)}", ""]
     for s in sections:
-        out.append(f"{c(s.rating, DOT[s.rating] + ' ' + LABEL[s.rating]):<8}  {bold(s.title)}")
-        out.append(f"          {s.headline}")
+        out.append(f"{c(s.rating, DOT[s.rating] + ' ' + LABEL[s.rating]):<8}  {bold(plain(s.title))}")
+        out.append(f"          {plain(s.headline)}")
         hidden = 0
         for r, what, detail, action in sorted(s.items, key=lambda i: -ORDER[i[0]]):
             # In a section that needs attention, green lines are noise unless
@@ -1612,8 +2693,8 @@ def html_report(sections, overall, start, end):
         rows.append(
             f'<details class="card {s.rating}" {"open" if s.rating not in (GREEN, GREY) else ""}>'
             f'<summary><span class="pill {s.rating}">{LABEL[s.rating]}</span>'
-            f'<span class="title">{e(s.title)}</span></summary>'
-            f'<p class="headline">{e(s.headline)}</p><ul>{"".join(items)}</ul></details>')
+            f'<span class="title">{e(plain(s.title))}</span></summary>'
+            f'<p class="headline">{e(plain(s.headline))}</p><ul>{"".join(items)}</ul></details>')
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1685,9 +2766,41 @@ def main():
     # limine-snapper-sync's snapshot bookkeeping, see limine_snapshot_change.
     ap.add_argument("--limine-snapshot-change", nargs=3, metavar=("PATH", "REFERENCE", "SINCE"),
                     help=argparse.SUPPRESS)
+    # For security-scan: reads owner and path pairs, each "OWNER\x1fPATH\0",
+    # on standard input, so no path reaches a command line, and prints
+    # "PATH\x1fREASON\0" for each file explain_changes() explains.
+    ap.add_argument("--explain-changes", nargs=2, metavar=("CONF", "PACMAN_LOG"),
+                    help=argparse.SUPPRESS)
+    # For security-scan: exits 0 when /usr/lib/modules/VERSION belongs to a
+    # kernel that is no longer installed, see old_kernel_modules.
+    ap.add_argument("--old-kernel-modules", metavar="VERSION", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.days < 1:
         ap.error("--days must be at least 1")
+    global _QKK_CACHE, _PACMAN_CACHE
+    _QKK_CACHE, _PACMAN_CACHE = {}, {}
+
+    if a.explain_changes:
+        conf, log_path = a.explain_changes
+        try:
+            log = Path(log_path).read_text(errors="replace")
+        except OSError:
+            log = ""
+        records = []
+        for rec in sys.stdin.buffer.read().split(b"\0"):
+            owner, sep, path = rec.decode(errors="surrogateescape").partition("\x1f")
+            # The answer is "PATH\x1fGRADE\x1fREASON", so a path holding a
+            # field separator or a control character could be read back as
+            # another path. The scan never sends one; skip it all the same.
+            if sep and path.startswith("/") and not _UNSAFE_CHARS.search(path + owner) and "\t" not in path:
+                records.append((owner, path))
+        out = sys.stdout.buffer
+        for path, grade, reason in explain_changes(records, conf, log):
+            out.write(f"{path}\x1f{grade}\x1f{plain(reason)}\0".encode(errors="surrogateescape"))
+        return 0
+
+    if a.old_kernel_modules:
+        return 0 if old_kernel_modules(a.old_kernel_modules) else 1
 
     if a.listed_link:
         conf, link = a.listed_link
@@ -1751,7 +2864,7 @@ def main():
             "start": since.isoformat(),
             "end": now.isoformat(),
             "sections": [{
-                "title": s.title, "rating": s.rating, "headline": s.headline,
+                "title": plain(s.title), "rating": s.rating, "headline": plain(s.headline),
                 "items": [{"rating": r, "what": w, "detail": d, "action": act}
                           for r, w, d, act in sorted(s.items, key=lambda i: -ORDER[i[0]])],
             } for s in sections],

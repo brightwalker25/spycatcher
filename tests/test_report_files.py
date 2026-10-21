@@ -140,7 +140,7 @@ class PacmanArguments(unittest.TestCase):
             self.assertEqual(R._pacman("-Qqo", "--", path), "pkg\n")
         argv = run.call_args.args[0]
         self.assertFalse(any("Private Repo" in a or "someone" in a for a in argv), argv)
-        self.assertEqual(argv, ["pacman", "-Qqo", "-"])
+        self.assertEqual(argv, ["/usr/bin/pacman", "-Qqo", "-"])
         self.assertEqual(run.call_args.kwargs.get("input"), path + "\n")
 
     def test_a_path_with_a_newline_is_not_asked_about(self):
