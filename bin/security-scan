@@ -505,7 +505,9 @@ aide)
   log "pacman window: $(date -d "@${last_run}" -Is) to $(date -Is)"
   # The version of the grading rules below. The weekly report re-applies its
   # own copies of the rules only to red lines of logs from earlier versions.
-  log "graded by security-scan rules 3"
+  # 4 since 0.3.0: an unpackaged file in a system code path written while
+  # pacman ran is amber, not red.
+  log "graded by security-scan rules 4"
   pacman_since=$(awk -v t="$since_ts" \
     '/\[ALPM\] (upgraded|installed|removed|reinstalled|downgraded) / { ts=substr($1,2,19); if (ts >= t) n++ } END { print n+0 }' \
     /var/log/pacman.log 2>/dev/null)
@@ -870,6 +872,8 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
           if [ "$home" -eq 1 ]; then
             verdict="AMBER ${what} ${path} (not from a package, confirm it was you)"
           else
+            # One written while pacman ran is amber through $explanation
+            # above (security-report's written_in_pacman_run()).
             verdict="RED ${what} ${path} (unpackaged file in a system code path)"
           fi
           ;;

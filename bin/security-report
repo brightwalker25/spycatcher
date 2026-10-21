@@ -1461,6 +1461,91 @@ def _hook_window(events, name, ctime):
     return False
 
 
+_TRANSACTION_START = "transaction started"
+
+
+@functools.lru_cache(maxsize=2)
+def _pacman_runs(log):
+    """(start, end) in epoch seconds for each pacman run in pacman.log text
+    `log`. A run starts at `transaction started`, or at the pre-transaction
+    hooks pacman logs just before it, and ends at the last [ALPM] line it
+    logged: the post-transaction hooks follow `transaction completed`, and
+    the last of them may run for minutes without a line, as a DKMS build
+    does. The next `transaction started`, or a gap of more than _STEP_MAX
+    seconds between two lines, closes a run. Neither kind of hook says which
+    it is, so where one run's post-transaction hooks meet the next run's
+    pre-transaction hooks, the order of their names decides: pacman runs each
+    set sorted by file name, so the next run starts where the names begin
+    again from a lower one. A hook put on the wrong side still lies inside one
+    of the two runs."""
+    events = _alpm_events(log)
+    starts = [i for i, (_, msg) in enumerate(events) if msg == _TRANSACTION_START]
+    begins = []
+    for s in starts:
+        b = s
+        while b > 0 and (not begins or b - 1 > begins[-1][1]):
+            m = _HOOK_RUN.match(events[b - 1][1])
+            if not m or events[b][0] - events[b - 1][0] > _STEP_MAX:
+                break
+            later = _HOOK_RUN.match(events[b][1])
+            if later and m.group(1) > later.group(1):
+                break
+            b -= 1
+        begins.append((b, s))
+    runs = []
+    for k, (b, s) in enumerate(begins):
+        stop = begins[k + 1][0] if k + 1 < len(begins) else len(events)
+        e = s
+        while e + 1 < stop and events[e + 1][0] - events[e][0] <= _STEP_MAX:
+            e += 1
+        runs.append((events[b][0], events[e][0]))
+    return runs
+
+
+def pacman_run_at(ctime, log=None):
+    """(start, end) of the pacman run whose span, from a second before its
+    first line to two seconds after its last, holds `ctime`, or None. pacman
+    keeps whole seconds, and a hook's last write may land just after the
+    line that closes it. `log` is pacman.log's text, read now when None."""
+    for start, end in _pacman_runs(_pacman_log(log)):
+        if start - 1 <= ctime <= end + 2:
+            return start, end
+    return None
+
+
+# The folders whose unpackaged files security-scan grades by place rather
+# than as system code: /boot by the package update count, the others amber.
+_NOT_SYSTEM_CODE = ("/boot/", "/usr/local/", "/opt/", "/etc/", "/root/", "/home/")
+
+
+def written_in_pacman_run(path, log=None):
+    """The start of the pacman run during which the unpackaged file at
+    `path` (or the link itself) last changed, as an aware datetime, or None.
+    This is the rule of last resort for a file in a system code path that no
+    other rule explains: no package vouches for it, but its change time puts
+    it inside a package update, when hooks and install scripts write such
+    files, so it is graded for the administrator to confirm rather than red.
+    A file written outside every run stays red. The change time cannot be
+    set back into a past run without changing the clock, but a program
+    already running as root that writes during a real update gets the same
+    amber."""
+    if path.startswith(_NOT_SYSTEM_CODE):
+        return None
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    run = pacman_run_at(st.st_ctime, log)
+    return dt.datetime.fromtimestamp(run[0]).astimezone() if run else None
+
+
+def _in_run_reason(start):
+    """The reason security-scan logs for a file written_in_pacman_run()
+    accepts."""
+    return (f"appeared during the package update of {start:%a %d %b %H:%M}, "
+            "which no rule explains; confirm")
+
+
 def _root_dir(path):
     """True when `path` itself, not a link to it, is a folder owned by root
     that no one else may write."""
@@ -1841,6 +1926,11 @@ def explain_changes(records, conf, log):
         elif found:
             yield path, MAYBE, (f"written while {found[0]}'s install script ran, which names the "
                                 "file but has no command that writes it; confirm")
+        else:
+            # Last, so that any rule that can name the package is preferred.
+            start = written_in_pacman_run(path, log)
+            if start:
+                yield path, MAYBE, _in_run_reason(start)
 
 
 def owned_all_along(path, when):
@@ -1888,7 +1978,9 @@ def unpackaged_explains(line, links, log, when=None, until=None, current=False):
         if rebuilt_by_hook(path, log) or depmod_rebuilt(path, log) or dkms_built(path, log):
             return PKG
         found = scriptlet_wrote(path, None, log)
-        return found[1] if found else None
+        if found:
+            return found[1]
+        return MAYBE if written_in_pacman_run(path, log) else None
     m = re.match(r"(?:added|changed) (\S+) \(owned by (\S+) but fails pacman's ownership or "
                  r"permission check\)$", line)
     if m:
@@ -2195,8 +2287,8 @@ def boot_explained_by_pacman(when, path, runs, log=None):
 
 # security-scan logs "graded by security-scan rules N" in each AIDE log since
 # 0.2.12, for the version of the rules it graded with: 2 in 0.2.12, 3 since
-# 0.2.13 added dkms_built().
-RULES_VERSION = 3
+# 0.2.13 added dkms_built(), 4 since 0.3.0 added written_in_pacman_run().
+RULES_VERSION = 4
 RULES_LINE = re.compile(r"^graded by security-scan rules (\d+)$", re.M)
 
 
