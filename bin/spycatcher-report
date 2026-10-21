@@ -2389,7 +2389,11 @@ def acked_until(path, acks, states=None):
             now = file_state(path)
             if states is not None:
                 states[path] = now
-        if now == recorded or (now == "unknown" and recorded != "absent"):
+        # A file that reappears where the report cannot look is logged
+        # again by the scan, and a later line is never covered, so "unknown"
+        # matches an acknowledged absence too (an old kernel image removed
+        # from /boot, say).
+        if now == recorded or now == "unknown":
             when = _ack_when(a)
             best = when if best is None or when > best else best
     return best

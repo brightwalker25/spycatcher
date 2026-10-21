@@ -6,6 +6,20 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-21
+
+### Fixed
+
+- A file acknowledged while absent, in a folder the desktop user may not
+  look into, stayed open in the report: root recorded it as absent and the
+  report, unable to look, saw it as unknown. Old kernel images that
+  limine-snapper-sync removes from `/boot` were the case. "Unknown" now
+  matches any recorded state, since a file that reappears is logged again
+  and an acknowledgement never covers a later line.
+- The tests read the machine's own acknowledgements, so a test could fail
+  on a machine that had acknowledged something. They now point at a file
+  that does not exist.
+
 ## [0.4.0] - 2026-10-21
 
 ### Changed

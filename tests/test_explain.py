@@ -32,6 +32,8 @@ def load_report():
     spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
+    # The machine's own acknowledgements must not hide what a test logs.
+    mod.ACKS = Path("/nonexistent/spycatcher/acknowledged.json")
     return mod
 
 

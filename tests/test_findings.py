@@ -558,9 +558,9 @@ class AckHelpers(Files):
             # Acknowledged as a file root could see: the report cannot tell,
             # so it takes the file as unchanged.
             self.assertEqual(self.r.acked_until("/p", [self.record({"/p": "file:1:2:3"})]), when)
-            # Acknowledged while absent: a path it cannot see may have
-            # appeared, so it is not covered.
-            self.assertIsNone(self.r.acked_until("/p", [self.record({"/p": "absent"})]))
+            # Acknowledged while absent: a file that reappears is logged
+            # again, and that later line is not covered.
+            self.assertEqual(self.r.acked_until("/p", [self.record({"/p": "absent"})]), when)
             # Never acknowledged.
             self.assertIsNone(self.r.acked_until("/p", []))
 
@@ -584,8 +584,10 @@ class UnknownState(Files):
         self.assertIn(f"first seen {self.day(1):%a %d %b}", reds[0][2])
         self.assertEqual(self.r.OPEN_RED_LOGS, {later})
 
-    def test_acknowledged_absent_is_not_covered(self):
+    def test_acknowledged_absent_is_covered_until_logged_again(self):
         self.ack_file(self.record({self.path: "absent"}, when=self.day(2)))
+        self.assertEqual(self.items(self.integrity(), self.r.RED), [])
+        self.log(self.day(1), red(self.path))
         self.assertEqual(len(self.items(self.integrity(), self.r.RED)), 1)
 
     @unittest.skipIf(os.geteuid() == 0, "root may search any folder")
@@ -597,7 +599,7 @@ class UnknownState(Files):
         os.chmod(self.dir / "locked", 0)
         self.addCleanup(os.chmod, self.dir / "locked", 0o700)
         self.assertEqual(r.acked_until(f, [self.record({f: state})]), self.now)
-        self.assertIsNone(r.acked_until(f, [self.record({f: "absent"})]))
+        self.assertEqual(r.acked_until(f, [self.record({f: "absent"})]), self.now)
 
 
 class Acknowledge(Files):
