@@ -6,6 +6,19 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-10-21
+
+### Changed
+
+- Green now also covers a CVE with no fix whose exposure is negligible on the
+  machine, so that a sensible habit is all it needs. Amber is for an exposure
+  that is contained only while its action is kept up. An entry that stays
+  amber for good kept the bar amber for good. The README and the example
+  register say so, and the example's wget entry is green, since nothing gives
+  wget a password. A CVE with no register entry is still amber or red until
+  it is assessed. Existing registers are not changed by the installer; edit
+  the ratings in `/etc/spycatcher/risk-register.toml` by hand.
+
 ## [0.4.2] - 2026-10-21
 
 ### Changed

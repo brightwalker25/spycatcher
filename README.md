@@ -105,10 +105,13 @@ spycatcher-report --json         # what the widget reads
 Every item in the report is green, amber or red, every section takes the worst
 rating of its items, and the overall rating is the worst of the sections.
 
-Green means there is no real exposure: the issue is fixed, not reachable, or
-not installed. Amber means the exposure is real but contained, and the report
-says how; it also covers changes that are probably yours but that only you can
-confirm. Red means something needs doing now, and in the file integrity
+Green means there is no real exposure: the issue is fixed, not reachable, not
+installed, or unfixed but negligible on this machine, so that a sensible habit
+is all it needs. Amber means the exposure is real and is contained only while
+the action the report gives is kept up; it also covers changes that are
+probably yours but that only you can confirm. An item that stays amber for
+good keeps the bar amber for good, so amber is kept for things that still need
+watching. Red means something needs doing now, and in the file integrity
 section it is kept for evidence: a package's file that fails pacman's check,
 a boot file that changed with no package update, or a file in a system code
 path that no package owns and that was written while pacman was not running.
