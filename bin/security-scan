@@ -499,7 +499,7 @@ aide)
   log "pacman window: $(date -d "@${last_run}" -Is) to $(date -Is)"
   # The version of the grading rules below. The weekly report re-applies its
   # own copies of the rules only to red lines of logs from earlier versions.
-  log "graded by security-scan rules 2"
+  log "graded by security-scan rules 3"
   pacman_since=$(awk -v t="$since_ts" \
     '/\[ALPM\] (upgraded|installed|removed|reinstalled|downgraded) / { ts=substr($1,2,19); if (ts >= t) n++ } END { print n+0 }' \
     /var/log/pacman.log 2>/dev/null)

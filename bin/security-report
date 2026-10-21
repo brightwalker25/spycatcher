@@ -1434,6 +1434,129 @@ def old_kernel_modules(version):
     return _pacman("-Qqo", "--", folder + "/") is None
 
 
+_DKMS_MODULE = re.compile(r"/usr/lib/modules/([A-Za-z0-9][A-Za-z0-9._+-]*)/updates/dkms/"
+                          r"([A-Za-z0-9][A-Za-z0-9_-]*\.ko(?:\.zst|\.xz|\.gz)?)")
+_DKMS_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]*")
+DKMS_TREE = "/var/lib/dkms"
+DKMS_SOURCES = "/usr/src"
+# The hook the dkms package installs; it builds every module for every
+# installed kernel after a kernel, headers or *-dkms package changes.
+DKMS_HOOK = "70-dkms-install.hook"
+
+
+def _hook_window(events, name, ctime):
+    """True when `ctime` falls while the hook `name` ran: from a second before
+    pacman.log records it starting to two seconds after the next line pacman
+    logged, at most _STEP_MAX seconds. pacman logs nothing while a hook runs,
+    and a DKMS build for one kernel takes minutes."""
+    for i, (when, msg) in enumerate(events):
+        m = _HOOK_RUN.match(msg)
+        if not m or m.group(1) != name:
+            continue
+        end = events[i + 1][0] if i + 1 < len(events) else when + _STEP_MAX
+        end = min(end, when + _STEP_MAX)
+        if when - 1 <= ctime <= end + 2:
+            return True
+    return False
+
+
+def _root_dir(path):
+    """True when `path` itself, not a link to it, is a folder owned by root
+    that no one else may write."""
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return False
+    return stat.S_ISDIR(st.st_mode) and _root_only(st)
+
+
+def _source_verified(owner, folder):
+    """True when `folder` is reached without a link and pacman -Qkk `owner`
+    finds nothing wrong with any file in it."""
+    if os.path.realpath(folder) != folder:
+        return False
+    out = _qkk(owner)
+    if out is None or re.search(rf"^{re.escape(owner)}: no mtree file$", out, re.M):
+        return False
+    inside = f" {folder}/"
+    return not any(inside in l and (_QKK_BAD.search(l) or "failed to calculate" in l)
+                   for l in out.splitlines())
+
+
+def dkms_built(path, log=None):
+    """The package whose DKMS source built the kernel module at `path`, or
+    None. dkms installs the modules it builds into
+    /usr/lib/modules/<kernel>/updates/dkms/, which no package owns. All of
+    these must hold: the module is a regular file there, for a kernel whose
+    module folder an installed package owns; it is byte for byte the copy
+    dkms keeps of its build in /var/lib/dkms/<name>/<version>/<kernel>/,
+    a regular file owned by root that no one else may write, reached through
+    folders that are no links and are root's alone; the source it was built
+    from, /usr/src/<name>-<version>/, is reached without a link, its
+    dkms.conf belongs to an installed package, and pacman verifies every
+    file of that package in the folder; and the module was last changed
+    while pacman ran the dkms hook. A module copied in by hand, or changed
+    after the build, stays red. AIDE does not watch /var/lib/dkms, so the
+    build copy is no independent witness: a program already running as root
+    could write both copies and a hook line in pacman.log, the same gap as
+    scriptlet_wrote() and hook_patched() have."""
+    m = _DKMS_MODULE.fullmatch(path)
+    if not m:
+        return None
+    kernel, name = m.groups()
+    try:
+        st = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISREG(st.st_mode) or not _owner_of(f"{MODULES}/{kernel}/"):
+        return None
+    if not _hook_window(_alpm_events(_pacman_log(log)), DKMS_HOOK, st.st_ctime):
+        return None
+    sha = None
+    if not _root_dir(DKMS_TREE):
+        return None
+    try:
+        modules = sorted(os.listdir(DKMS_TREE))
+    except OSError:
+        return None
+    for module in modules:
+        try:
+            versions = sorted(os.listdir(os.path.join(DKMS_TREE, module)))
+        except OSError:
+            continue
+        for version in versions:
+            if not _DKMS_NAME.fullmatch(module) or not _DKMS_NAME.fullmatch(version):
+                continue
+            kept = os.path.join(DKMS_TREE, module, version, kernel)
+            if not all(_root_dir(d) for d in (os.path.join(DKMS_TREE, module),
+                                              os.path.join(DKMS_TREE, module, version), kept)):
+                continue
+            try:
+                arches = sorted(os.listdir(kept))
+            except OSError:
+                continue
+            for arch in arches:
+                folder = os.path.join(kept, arch, "module")
+                if not _root_dir(os.path.join(kept, arch)) or not _root_dir(folder):
+                    continue
+                copy = os.path.join(folder, name)
+                try:
+                    cst = os.lstat(copy)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(cst.st_mode) or not _root_only(cst):
+                    continue
+                if sha is None:
+                    sha = _sha256(path)
+                if sha is None or _sha256(copy) != sha:
+                    continue
+                source = os.path.join(DKMS_SOURCES, f"{module}-{version}")
+                pkg = _owner_of(os.path.join(source, "dkms.conf"))
+                if pkg and _source_verified(pkg, source):
+                    return pkg
+    return None
+
+
 MOUNTINFO = "/proc/self/mountinfo"
 # File systems that keep no Unix mode or owner: every file gets those the
 # mount options give it.
@@ -1707,6 +1830,10 @@ def explain_changes(records, conf, log):
         if pkg:
             yield path, PKG, f"module index for {pkg}, the same as depmod builds it now"
             continue
+        pkg = dkms_built(path, log)
+        if pkg:
+            yield path, PKG, f"kernel module dkms built from {pkg} while pacman ran its hook"
+            continue
         found = scriptlet_wrote(path, None, log)
         if found and found[1] == PKG:
             yield path, PKG, f"written by {found[0]}'s install script while pacman installed it"
@@ -1757,7 +1884,7 @@ def unpackaged_explains(line, links, log, when=None, until=None, current=False):
             return None
         if when is not None and owned_all_along(path, when):
             return PKG
-        if rebuilt_by_hook(path, log) or depmod_rebuilt(path, log):
+        if rebuilt_by_hook(path, log) or depmod_rebuilt(path, log) or dkms_built(path, log):
             return PKG
         found = scriptlet_wrote(path, None, log)
         return found[1] if found else None
@@ -2066,8 +2193,9 @@ def boot_explained_by_pacman(when, path, runs, log=None):
 
 
 # security-scan logs "graded by security-scan rules N" in each AIDE log since
-# 0.2.12, for the version of the rules it graded with.
-RULES_VERSION = 2
+# 0.2.12, for the version of the rules it graded with: 2 in 0.2.12, 3 since
+# 0.2.13 added dkms_built().
+RULES_VERSION = 3
 RULES_LINE = re.compile(r"^graded by security-scan rules (\d+)$", re.M)
 
 

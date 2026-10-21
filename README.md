@@ -223,6 +223,20 @@ explains each change before it is reported:
   into a temporary folder that links to the real module tree, so nothing on
   the system is written, once per kernel version and run, which takes about
   a second. The modules themselves are checked as package files.
+- A kernel module that DKMS builds, such as the NVIDIA driver from
+  `nvidia-open-dkms`, is installed into
+  `/usr/lib/modules/<kernel>/updates/dkms/`, which no package owns. It is a
+  package change when it is a regular file for a kernel whose module folder
+  an installed package owns; it is byte for byte the copy dkms keeps of its
+  build in `/var/lib/dkms/<name>/<version>/<kernel>/<arch>/module/`, which
+  must be a regular file owned by root that no one else may write; the
+  source it was built from, `/usr/src/<name>-<version>/`, is reached
+  without a link, its `dkms.conf` belongs to an installed package, and
+  pacman finds nothing wrong with any of that package's files there; and the
+  module was last changed while pacman ran the dkms package's
+  `70-dkms-install.hook`, from when pacman.log records the hook starting
+  until the next line pacman logs. A module copied in by hand, or changed
+  later, stays red.
 - A file a package's own install script writes, such as a link to the build
   that suits this CPU, or its own file it edits with `sed -i`, is a package
   change when the file was last changed while pacman.log shows that package
@@ -508,7 +522,9 @@ kernel sets, so a file changed at any other moment stays red. A program that
 already runs as root could still wait for the package's step and write the
 file inside it, and that write would be accepted whatever it holds. The
 module index and `HOOK_PATCHED` files are compared by content and do not
-have this gap.
+have this gap. A module DKMS built has it too: AIDE does not watch
+`/var/lib/dkms`, so a program running as root could write the module, the
+copy dkms keeps of it and a hook line in pacman.log.
 
 AIDE does not record a file whose name is not valid UTF-8; it skips such a
 name without a word, so a file planted under one is not seen by this check.

@@ -363,6 +363,159 @@ class DepmodSums(Files):
         self.assertEqual((src / "modules.dep").read_text(), "stale\n")
 
 
+class Dkms(Files):
+    """A module dkms built must be its own build, installed while pacman ran
+    the dkms hook, from a source a package owns."""
+
+    PATH = "/usr/lib/modules/9.9.9-test/updates/dkms/nvidia.ko.zst"
+    CONF = "/src/nvidia-615.78.08/dkms.conf"
+
+    def setUp(self):
+        super().setUp()
+        self.module = self.make("installed/nvidia.ko.zst", "build")
+        self.copy = self.make("tree/nvidia/615.78.08/9.9.9-test/x86_64/module/nvidia.ko.zst",
+                              "build")
+        c = self.ctime(self.module)
+        self.log = (f"[{stamp(c, -60)}] [ALPM] running '70-dkms-install.hook'...\n"
+                    f"[{stamp(c, 60)}] [ALPM] running '90-mkinitcpio-install.hook'...\n")
+        self.owners = {"/usr/lib/modules/9.9.9-test/": "linux",
+                       str(self.dir) + self.CONF: "nvidia-open-dkms"}
+        self.source = self.dir / "src/nvidia-615.78.08"
+        self.source.mkdir(parents=True)
+        self.root_only = True
+        self.qkk = "nvidia-open-dkms: 4643 total files, 0 altered files\n"
+
+    def built(self, path=PATH, log=None):
+        real_lstat = os.lstat
+        module = self.module
+
+        def lstat(p):
+            return real_lstat(module if p == path else p)
+
+        def sha(p):
+            return hashlib.sha256(Path(module if p == path else p).read_bytes()).hexdigest()
+        with mock.patch.object(self.r, "DKMS_TREE", str(self.dir / "tree")), \
+             mock.patch.object(self.r, "DKMS_SOURCES", str(self.dir / "src")), \
+             mock.patch.object(self.r.os, "lstat", side_effect=lstat), \
+             mock.patch.object(self.r, "_sha256", side_effect=sha), \
+             mock.patch.object(self.r, "_root_only", return_value=self.root_only), \
+             mock.patch.object(self.r, "_owner_of", side_effect=lambda p: self.owners.get(p, "")), \
+             mock.patch.object(self.r, "_qkk", return_value=self.qkk):
+            return self.r.dkms_built(path, self.log if log is None else log)
+
+    def test_its_own_build_while_the_hook_ran(self):
+        self.assertEqual(self.built(), "nvidia-open-dkms")
+
+    def test_other_content(self):
+        Path(self.copy).write_text("other build")
+        self.assertIsNone(self.built())
+
+    def test_no_build_kept(self):
+        os.unlink(self.copy)
+        self.assertIsNone(self.built())
+
+    def test_build_copy_writable_by_others(self):
+        self.root_only = False
+        self.assertIsNone(self.built())
+
+    def test_build_copy_is_a_link(self):
+        os.unlink(self.copy)
+        os.symlink(self.module, self.copy)
+        self.assertIsNone(self.built())
+
+    def test_written_outside_the_hook(self):
+        c = self.ctime(self.module)
+        log = (f"[{stamp(c, -600)}] [ALPM] running '70-dkms-install.hook'...\n"
+               f"[{stamp(c, -500)}] [ALPM] running '90-mkinitcpio-install.hook'...\n")
+        self.assertIsNone(self.built(log=log))
+
+    def test_another_hook_ran(self):
+        self.assertIsNone(self.built(log=self.log.replace("70-dkms-install", "60-depmod")))
+
+    def test_no_pacman_log(self):
+        self.assertIsNone(self.built(log=""))
+
+    def test_kernel_no_package_owns(self):
+        # dkms remove can restore modules into the folder of a kernel that is
+        # no longer installed.
+        del self.owners["/usr/lib/modules/9.9.9-test/"]
+        self.assertIsNone(self.built())
+
+    def test_source_no_package_owns(self):
+        self.owners.pop(str(self.dir) + self.CONF)
+        self.assertIsNone(self.built())
+
+    def test_source_fails_pacman(self):
+        # Review: an edited .c file in the source builds a different module.
+        self.qkk = (f"warning: nvidia-open-dkms: {self.source}/kernel/nvidia.c "
+                    "(SHA256 checksum mismatch)\n")
+        self.assertIsNone(self.built())
+
+    def test_other_files_of_the_package_do_not_count(self):
+        self.qkk = ("warning: nvidia-open-dkms: /usr/share/doc/nvidia/README "
+                    "(SHA256 checksum mismatch)\n")
+        self.assertEqual(self.built(), "nvidia-open-dkms")
+
+    def test_source_without_a_file_list(self):
+        self.qkk = "nvidia-open-dkms: no mtree file\n"
+        self.assertIsNone(self.built())
+
+    def test_source_folder_is_a_link(self):
+        # Review: pacman -Qo follows links in the folder part of a path.
+        real = self.dir / "elsewhere"
+        self.source.rename(real)
+        os.symlink(real, self.source)
+        self.assertIsNone(self.built())
+
+    def test_build_folder_is_a_link(self):
+        # Review: a link to a folder others may write breaks the root-only copy.
+        folder = self.dir / "tree/nvidia/615.78.08/9.9.9-test/x86_64/module"
+        elsewhere = self.dir / "writable"
+        folder.rename(elsewhere)
+        os.symlink(elsewhere, folder)
+        self.assertIsNone(self.built())
+
+    def test_explained_for_the_scan(self):
+        with mock.patch.object(self.r, "dkms_built", return_value="nvidia-open-dkms"), \
+             mock.patch.object(self.r, "rebuilt_by_hook", return_value=None), \
+             mock.patch.object(self.r, "scriptlet_link_package", return_value=None), \
+             mock.patch.object(self.r, "listed_link_package", return_value=None), \
+             mock.patch.object(self.r, "depmod_rebuilt", return_value=None):
+            out = list(self.r.explain_changes([("", self.PATH)], "", ""))
+        self.assertEqual(out, [(self.PATH, "PKG", "kernel module dkms built from "
+                                "nvidia-open-dkms while pacman ran its hook")])
+
+    def test_old_red_line_rechecked(self):
+        line = f"added {self.PATH} (unpackaged file in a system code path)"
+        later = dt.datetime.now() + dt.timedelta(minutes=1)
+        with mock.patch.object(self.r, "unchanged_since", return_value=True), \
+             mock.patch.object(self.r, "owned_all_along", return_value=False), \
+             mock.patch.object(self.r, "rebuilt_by_hook", return_value=None), \
+             mock.patch.object(self.r, "depmod_rebuilt", return_value=None), \
+             mock.patch.object(self.r, "dkms_built", return_value="nvidia-open-dkms"):
+            self.assertEqual(self.r.unpackaged_explains(line, {}, "", None, later), "PKG")
+            self.assertIsNone(self.r.unpackaged_explains(line, {}, "", None, later, current=True))
+
+    def test_only_modules_in_the_dkms_folder(self):
+        self.assertIsNone(self.built(path="/usr/lib/modules/9.9.9-test/kernel/nvidia.ko.zst"))
+        self.assertIsNone(self.built(path="/usr/lib/modules/9.9.9-test/updates/dkms/x/nvidia.ko"))
+        self.assertIsNone(self.built(path="/usr/lib/modules/../etc/updates/dkms/nvidia.ko"))
+        self.assertIsNone(self.built(path="/usr/lib/modules/9.9.9-test/updates/dkms/nvidia.so"))
+
+    def test_window_closes_at_the_next_line(self):
+        c = self.ctime(self.module)
+        log = (f"[{stamp(c, -60)}] [ALPM] running '70-dkms-install.hook'...\n"
+               f"[{stamp(c, -10)}] [ALPM] running '90-mkinitcpio-install.hook'...\n")
+        self.assertIsNone(self.built(log=log))
+
+    def test_last_hook_in_the_log(self):
+        c = self.ctime(self.module)
+        log = f"[{stamp(c, -60)}] [ALPM] running '70-dkms-install.hook'...\n"
+        self.assertEqual(self.built(log=log), "nvidia-open-dkms")
+        log = f"[{stamp(c, -2 * self.r._STEP_MAX)}] [ALPM] running '70-dkms-install.hook'...\n"
+        self.assertIsNone(self.built(log=log))
+
+
 class OldKernel(unittest.TestCase):
     def setUp(self):
         self.r = load_report()
@@ -541,7 +694,7 @@ class ReportSpeed(unittest.TestCase):
         now = self.r.dt.datetime(2026, 10, 21, 12, 0)
         lines = "".join(f"RED changed /usr/bin/t{i} (unpackaged file in a system code path)\n"
                         for i in range(50))
-        lines = ("graded by security-scan rules 2\n" + lines
+        lines = (f"graded by security-scan rules {self.r.RULES_VERSION}\n" + lines
                  + "=== done at 2026-10-21T11:00:00+01:00 ===\n")
         with mock.patch.object(self.r, "logs", return_value=([(now, "log")], None)), \
              mock.patch.object(self.r, "read", return_value=lines), \

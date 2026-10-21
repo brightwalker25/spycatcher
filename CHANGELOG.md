@@ -6,6 +6,31 @@ Notable changes to the Security Scan plugin and its scan suite. Versions follow
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-10-21
+
+### Fixed
+
+- Kernel modules that DKMS builds, such as the NVIDIA driver from
+  `nvidia-open-dkms`, read as red "unpackaged file in a system code path"
+  after every NVIDIA or kernel update. dkms installs them into
+  `/usr/lib/modules/<kernel>/updates/dkms/`, which no package owns. Such a
+  module is now a package change when all of these hold: it is a regular
+  file, for a kernel whose module folder an installed package owns; it is
+  byte for byte the copy dkms keeps of its build in
+  `/var/lib/dkms/<name>/<version>/<kernel>/<arch>/module/`, which must be a
+  regular file owned by root that no one else may write, in folders that are
+  root's alone and not links; the source it was built from,
+  `/usr/src/<name>-<version>/`, is reached without a link, its `dkms.conf`
+  belongs to an installed package, and pacman finds nothing wrong with any
+  of that package's files there; and the module was last
+  changed while pacman ran the dkms package's `70-dkms-install.hook`, from
+  when pacman.log records the hook starting until the next line pacman
+  logs. A module copied in by hand, or changed later, stays red.
+- The report applies the same rule to red lines logged before this version.
+  Each AIDE log now records that it was graded with security-scan rules 3,
+  so the red lines of logs from 0.2.12 are re-checked against all the
+  current rules, as long as the file has not changed since that run.
+
 ## [0.2.12] - 2026-10-21
 
 ### Security
