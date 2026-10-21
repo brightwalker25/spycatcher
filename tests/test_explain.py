@@ -703,7 +703,9 @@ class ReportSpeed(unittest.TestCase):
              mock.patch.object(self.r.subprocess, "run") as run:
             s = self.r.integrity(now, now)
         self.assertEqual(run.call_count, 0)
-        self.assertEqual(len([i for i in s.items if i[0] == self.r.RED]), 50)
+        # One folder and one day: one item that counts the 50 files.
+        self.assertEqual(len([i for i in s.items if i[0] == self.r.RED]), 1)
+        self.assertIn("(50 file(s))", s.headline)
 
 
 class ExplainRecords(unittest.TestCase):

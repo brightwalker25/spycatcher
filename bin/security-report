@@ -44,6 +44,7 @@ LOG_DIR = Path(os.environ.get("LOG_DIR", "/var/log/security-scan"))
 REGISTER = Path(os.environ.get("RISK_REGISTER", "/etc/security-scan/risk-register.toml"))
 SCAN_CONF = Path(os.environ.get("SCAN_CONF", "/etc/security-scan/scan.conf"))
 PACMAN_LOG = Path(os.environ.get("PACMAN_LOG", "/var/log/pacman.log"))
+ACKS = Path(os.environ.get("SECURITY_ACKS", "/etc/security-scan/acknowledged.json"))
 
 GREEN, AMBER, RED = "green", "amber", "red"
 # Grey is neutral: off, not installed, or not applicable. It never makes a
@@ -2212,25 +2213,151 @@ def recheck(line, links, log, when, until, current):
     return unpackaged_explains(line, links, log, when, until, current)
 
 
+# --- findings and acknowledgements ------------------------------------------
+#
+# The AIDE section reports findings, not log lines. A path logged by several
+# runs is one finding, dated by the first run that logged it, and findings
+# are grouped by the folder they are in and the day they were first seen, so
+# one kernel update reads as one item. Each group has an ID that
+# `sudo security-report --ack ID` records as checked. A red stays until it is
+# acknowledged or a rule explains it; it does not age out of the window.
+
+def file_state(path):
+    """What `path` is now, for telling whether an acknowledged file has
+    changed since: its type, and for a file its inode, size and change time,
+    which no write leaves alone and which cannot be set back without moving
+    the clock. Read with lstat, so the report running as the desktop user
+    sees what root saw. "unknown" when a folder on the way may not be
+    searched."""
+    try:
+        st = os.lstat(path)
+    except PermissionError:
+        return "unknown"
+    except OSError:
+        return "absent"
+    if stat.S_ISLNK(st.st_mode):
+        try:
+            return f"link:{os.readlink(path)}:{st.st_ctime_ns}"
+        except OSError:
+            return "unknown"
+    if stat.S_ISDIR(st.st_mode):
+        return f"folder:{st.st_mode:o}:{st.st_uid}:{st.st_gid}"
+    kind = "file" if stat.S_ISREG(st.st_mode) else "other"
+    return f"{kind}:{st.st_ino}:{st.st_size}:{st.st_ctime_ns}"
+
+
+def load_acks(path=None):
+    """The acknowledgements as a list of records, each {"id", "when",
+    "reason", "by", "paths": {path: file_state}}. An unreadable or malformed
+    file acknowledges nothing."""
+    try:
+        data = json.loads((path or ACKS).read_text())
+    except (OSError, ValueError):
+        return []
+    acks = data.get("acks") if isinstance(data, dict) else None
+    if not isinstance(acks, list):
+        return []
+    return [a for a in acks if isinstance(a, dict) and isinstance(a.get("paths"), dict)]
+
+
+def acked_paths(acks):
+    """{path: set of states} over every acknowledgement."""
+    out = {}
+    for a in acks:
+        for path, state in a["paths"].items():
+            if isinstance(path, str) and isinstance(state, str):
+                out.setdefault(path, set()).add(state)
+    return out
+
+
+def is_acked(path, acked):
+    """True when `path` was acknowledged in the state it is in now. A path
+    the desktop user may not look at counts as unchanged: the report cannot
+    tell, and root's own check at acknowledgement time saw it."""
+    states = acked.get(path)
+    if not states:
+        return False
+    now = file_state(path)
+    return now in states or (now == "unknown" and "absent" not in states)
+
+
+def group_id(kind, folder, day):
+    return hashlib.sha256(f"aide\x1f{kind}\x1f{folder}\x1f{day}".encode()).hexdigest()[:8]
+
+
+def finding_groups(kind, found):
+    """[(id, folder, first seen, [(when, path, line)])] for findings
+    {path: (when, line)}, grouped by the folder each is in, cut to its first
+    three levels, the largest group first. Reds are grouped by the day first
+    seen as well, which tells one event from another; ambers leave the
+    window after a week, so one folder is one item. The ID is only a name
+    for the group: an acknowledgement holds each file's state."""
+    groups = {}
+    for path, (when, line) in found.items():
+        # Files removed that no package listed are one event a day: an
+        # upgrade removes them from hundreds of folders at once, and a
+        # removal adds no code.
+        if line.endswith(f"({REMOVED_UNLISTED})"):
+            folder = REMOVED_UNLISTED
+        else:
+            folder = "/".join(os.path.dirname(path).split("/")[:4]) or "/"
+        day = when.date() if kind == RED or folder == REMOVED_UNLISTED else None
+        groups.setdefault((folder, day), []).append((when, path, line))
+    out = []
+    for (folder, day), entries in groups.items():
+        entries.sort()
+        out.append((group_id(kind, folder, day.isoformat() if day else ""), folder,
+                    entries[0][0], entries))
+    out.sort(key=lambda g: (-len(g[3]), g[1]))
+    return out
+
+
+REMOVED_UNLISTED = "unpackaged file removed"
+# Every AIDE group the last integrity() call reported, {id: [path]}, for
+# --ack, and the logs that hold an open red, for --keep-logs.
+FOUND_GROUPS = {}
+AMBER_GROUPS = set()
+OPEN_RED_LOGS = set()
+
+
+def ack_hint(gid):
+    return f'Once checked, clear it with: sudo security-report --ack {gid} --reason "what it was"'
+
+
 def integrity(now, since):
     s = Section("System file integrity (AIDE)", GREEN, "")
     recent, _ = logs("aide", since)
     if not recent:
         s.rating, s.headline = AMBER, "No AIDE result yet."
         return s
-    reds, ambers, pkg = [], [], 0
+    reds, ambers, pkg = {}, {}, 0
     links = listed_links()
     runs, _ = logs("aide", dt.datetime.min)
+    in_window = {p for _, p in recent}
     pacman_log = None
     old_kernels = {}
+    FOUND_GROUPS.clear()
+    AMBER_GROUPS.clear()
+    OPEN_RED_LOGS.clear()
+    red_log = {}
+
+    def first(found, when, line, p=None):
+        path = line.split(" ", 2)[1] if line.count(" ") >= 2 else line
+        if path not in found or when < found[path][0]:
+            found[path] = (when, line)
+            if p is not None:
+                red_log[path] = p
     # One pacman call for the owners of every red file in logs from before
     # these rules, which are the ones re-checked below.
     prefetch_owners(re.findall(r"^RED (?:added|changed) (\S+) ", "".join(
-        t for t in (read(p) for _, p in recent)
+        t for t in (read(p) for _, p in runs)
         if not (RULES_LINE.search(t) and int(RULES_LINE.search(t).group(1)) >= RULES_VERSION)),
         re.M))
-    for when, p in recent:
+    # Reds are read from every log kept, so one does not age out unseen;
+    # ambers and the package count from the window only.
+    for when, p in runs:
         text = read(p)
+        recent_run = p in in_window
         # A run that logged the rules version it graded with already applied
         # every rule below; only scan.conf's lists, which the administrator
         # may have added to since, are applied to its red lines again. A
@@ -2248,7 +2375,7 @@ def integrity(now, since):
                     except OSError:
                         pacman_log = ""
                 if boot_explained_by_pacman(when, p, runs, pacman_log):
-                    pkg += 1
+                    pkg += recent_run
                     continue
             # A red limine.conf or snapshots.json line is not re-read with
             # limine_snapshot_change: the report cannot read /boot or the
@@ -2256,11 +2383,14 @@ def integrity(now, since):
             if line.startswith("RED "):
                 grade = recheck(line[4:], links, pacman_log, when, until, current)
                 if grade == PKG:
-                    pkg += 1
+                    pkg += recent_run
                 elif grade == MAYBE:
-                    ambers.append((when, line[4:]))
+                    if recent_run:
+                        first(ambers, when, line[4:])
                 else:
-                    reds.append((when, line[4:]))
+                    first(reds, when, line[4:], p)
+            elif not recent_run:
+                continue
             elif line.startswith("AMBER "):
                 # Modules of a kernel that is gone, logged one by one before
                 # the scan summarised them.
@@ -2270,38 +2400,59 @@ def integrity(now, since):
                 if m and old_kernels[m.group(1)]:
                     pkg += 1
                     continue
-                ambers.append((when, line[6:]))
+                first(ambers, when, line[6:])
             elif line.startswith("PKG "):
                 # The scan logs a removed kernel's modules as one line that
                 # counts them.
                 m = re.match(r"PKG removed /usr/lib/modules/\S+ \((\d+) entries, ", line)
                 pkg += int(m.group(1)) if m else 1
-    for when, line in reds:
-        s.add(RED, line, when.strftime("%a %d %b"),
-              "A system file changed outside any package update. Do not ignore: compare with "
-              "pacman -Qkk, and if unexplained treat the machine as compromised.")
-    # Amber changes are mostly your own edits; group them by folder so a week
-    # of work reads as a few lines, not hundreds.
-    groups = {}
-    for when, line in ambers:
-        m = re.match(r"(\w+) (\S+)", line)
-        path = m.group(2) if m else line
-        key = "/".join(path.split("/")[:4])
-        groups.setdefault(key, []).append(path)
-    for key, paths in sorted(groups.items(), key=lambda kv: -len(kv[1])):
-        example = paths[0] if len(paths) == 1 else f"{len(paths)} files, e.g. {paths[0]}"
-        s.add(AMBER, f"Changed outside a package: {key}", example,
-              "Confirm these were your own changes (installs, config edits).")
-    runs = len(recent)
-    if reds:
-        s.headline = f"{len(reds)} unexplained change(s) to system files."
-    elif ambers:
-        s.headline = (f"{runs} check(s) ran. No unexplained changes. {len(ambers)} change(s) "
-                      f"outside packages to confirm; {pkg} came from package updates.")
+    acks = load_acks()
+    acked = acked_paths(acks)
+    reds = {k: v for k, v in reds.items() if not is_acked(k, acked)}
+    ambers = {k: v for k, v in ambers.items() if k not in reds and not is_acked(k, acked)}
+    OPEN_RED_LOGS.update(red_log[k] for k in reds)
+    red_groups = finding_groups(RED, reds)
+    for gid, folder, seen, entries in red_groups:
+        FOUND_GROUPS[gid] = [path for _, path, _ in entries]
+        if len(entries) == 1:
+            what = entries[0][2]
+        else:
+            what = f"{len(entries)} unexplained changes under {folder}"
+        s.add(RED, what,
+              f"Item {gid}, first seen {seen:%a %d %b}."
+              + (f" For example: {entries[0][2]}" if len(entries) > 1 else ""),
+              "A system file changed outside any package update. Compare with pacman -Qkk, "
+              "and if it cannot be explained treat the machine as compromised. " + ack_hint(gid))
+    # Amber changes are mostly your own edits or an update doing something no
+    # rule knows; grouped by folder and day, a week of work reads as a few lines.
+    amber_groups = finding_groups(AMBER, ambers)
+    for gid, folder, seen, entries in amber_groups:
+        FOUND_GROUPS[gid] = [path for _, path, _ in entries]
+        AMBER_GROUPS.add(gid)
+        example = (entries[0][2] if len(entries) == 1
+                   else f"{len(entries)} files, e.g. {entries[0][2]}")
+        s.add(AMBER, (f"{len(entries)} file(s) removed that no package listed at the last check"
+                      if folder == REMOVED_UNLISTED else f"Changed outside a package: {folder}"),
+              f"Item {gid}, first seen {seen:%a %d %b}. {example}",
+              "Confirm these were your own changes (installs, config edits) or a package "
+              "update. " + ack_hint(gid))
+    # Every acknowledgement is listed, so one you did not make shows.
+    for a in sorted(acks, key=lambda a: str(a.get("when", ""))):
+        s.add(GREEN, f"Acknowledged {a.get('id', '?')}: {a.get('reason', '')}",
+              f"{len(a['paths'])} file(s), {str(a.get('when', '?'))[:16].replace('T', ' ')}"
+              f" by {a.get('by', '?')}")
+    runs_n = len(recent)
+    if red_groups:
+        s.headline = (f"{len(red_groups)} item(s) of unexplained changes to system files "
+                      f"({len(reds)} file(s)).")
+    elif amber_groups:
+        s.headline = (f"{runs_n} check(s) ran. No unexplained changes. {len(amber_groups)} "
+                      f"item(s) to confirm ({len(ambers)} file(s)); {pkg} came from package "
+                      "updates.")
     else:
-        s.headline = f"{runs} check(s) ran. Nothing changed except through package updates ({pkg} files)."
+        s.headline = (f"{runs_n} check(s) ran. Nothing changed except through package updates "
+                      f"({pkg} files).")
     return s
-
 
 def rootkit(now, since):
     s = Section("Rootkit check (rkhunter)", GREEN, "")
@@ -2871,6 +3022,69 @@ li {{ display:flex; gap:10px; padding:10px 0; border-top:1px solid var(--line); 
 """
 
 
+def write_acks(acks):
+    """Writes the acknowledgements as root, readable by the group the risk
+    register is shared with, through a new file moved into place."""
+    try:
+        gid = os.stat(REGISTER).st_gid
+    except OSError:
+        gid = 0
+    tmp = ACKS.with_name(ACKS.name + ".new")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"version": 1, "acks": acks}, f, indent=1, sort_keys=True)
+        f.write("\n")
+    os.chown(tmp, 0, gid)
+    os.chmod(tmp, 0o640 if gid else 0o600)
+    os.replace(tmp, ACKS)
+
+
+def acknowledge(ids, reason, unack, now, since):
+    """--ack and --unack. Root only, so nothing running as the desktop user
+    can silence a red. Each acknowledgement records every file of the item in
+    the state it is in now, and is noted in the journal."""
+    if os.geteuid() != 0:
+        print("security-report: acknowledging needs root: sudo security-report --ack ...",
+              file=sys.stderr)
+        return 2
+    acks = load_acks()
+    if unack:
+        kept = [x for x in acks if x.get("id") != unack]
+        if len(kept) == len(acks):
+            print(f"security-report: no acknowledgement {unack}", file=sys.stderr)
+            return 1
+        write_acks(kept)
+        subprocess.run(["logger", "-t", "security-report", f"acknowledgement {unack} removed"],
+                       check=False)
+        print(f"removed {unack}")
+        return 0
+    if not reason or not reason.strip():
+        print("security-report: say what was checked: --reason \"...\"", file=sys.stderr)
+        return 2
+    integrity(now, since)
+    # "amber" stands for every open amber item: a first check after an
+    # upgrade can list many folders of files the upgrade removed. Reds are
+    # acknowledged one by one.
+    if "amber" in ids:
+        ids = [i for i in ids if i != "amber"] + sorted(AMBER_GROUPS)
+    missing = [i for i in ids if i not in FOUND_GROUPS]
+    if missing:
+        print(f"security-report: no open item {', '.join(missing)}; "
+              "run security-report to see the current IDs", file=sys.stderr)
+        return 1
+    by = os.environ.get("SUDO_USER") or "root"
+    for i in ids:
+        paths = {path: file_state(path) for path in FOUND_GROUPS[i]}
+        acks.append({"id": i, "when": now.isoformat(), "by": by, "reason": plain(reason.strip()),
+                     "paths": paths})
+        subprocess.run(["logger", "-t", "security-report",
+                        f"{by} acknowledged {i} ({len(paths)} file(s)): {plain(reason.strip())}"],
+                       check=False)
+        print(f"acknowledged {i}: {len(paths)} file(s)")
+    write_acks(acks)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--days", type=int, default=7,
@@ -2902,6 +3116,15 @@ def main():
     # For security-scan: exits 0 when /usr/lib/modules/VERSION belongs to a
     # kernel that is no longer installed, see old_kernel_modules.
     ap.add_argument("--old-kernel-modules", metavar="VERSION", help=argparse.SUPPRESS)
+    ap.add_argument("--ack", nargs="+", metavar="ID",
+                    help="as root: record AIDE items as checked, with --reason; "
+                         "'amber' stands for every open amber item")
+    ap.add_argument("--reason", metavar="TEXT", help="why the items in --ack are harmless")
+    ap.add_argument("--unack", metavar="ID", help="as root: remove an acknowledgement")
+    ap.add_argument("--acks", action="store_true", help="list acknowledgements")
+    # For security-scan: prints the AIDE logs that still hold a red nobody
+    # has acknowledged, one per line, which pruning keeps.
+    ap.add_argument("--keep-logs", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
     if a.days < 1:
         ap.error("--days must be at least 1")
@@ -2966,6 +3189,20 @@ def main():
 
     now = dt.datetime.now().replace(microsecond=0)
     since = now - dt.timedelta(days=a.days)
+
+    if a.acks:
+        for rec in load_acks():
+            print(f"{rec.get('id', '?')}  {str(rec.get('when', '?'))[:16].replace('T', ' ')}  "
+                  f"{rec.get('by', '?')}  {len(rec['paths'])} file(s)  {plain(rec.get('reason', ''))}")
+        return 0
+    if a.keep_logs:
+        integrity(now, since)
+        for p in sorted(OPEN_RED_LOGS):
+            print(p)
+        return 0
+    if a.ack or a.unack:
+        return acknowledge(a.ack or [], a.reason, a.unack, now, since)
+
     try:
         reg = tomllib.loads(REGISTER.read_text())
     except (OSError, tomllib.TOMLDecodeError) as err:

@@ -72,4 +72,8 @@ Dirs   = p+u+g+acl+xattrs+ftype
 # Rewritten with fresh random bytes at every boot and shutdown; its content
 # is meant to change and says nothing about integrity.
 !/boot/loader/random-seed$
+# Written by `sudo security-report --ack`. The report lists every
+# acknowledgement it holds, so one nobody made shows there, and a change to it
+# here would only raise an amber for each acknowledgement.
+!/etc/security-scan/acknowledged\.json$
 !/opt/security-scan/picklescan/.*/__pycache__/
