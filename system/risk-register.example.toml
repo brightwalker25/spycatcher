@@ -1,11 +1,11 @@
-# Risk register for security-report.
+# Risk register for spycatcher-report.
 #
 # Each entry records what a finding means on this machine and what is being
-# done about it while it stays open. security-report grades against this file:
+# done about it while it stays open. spycatcher-report grades against this file:
 # a finding with no entry is shown as "not yet assessed", which is itself a
 # finding. Keep entries short and dated; re-assess when the version changes.
 #
-# Installed as /etc/security-scan/risk-register.toml only when that file does
+# Installed as /etc/spycatcher/risk-register.toml only when that file does
 # not exist yet. The entries below are examples of each kind. Replace them
 # with your own assessments; do not trust the ratings here for your machine.
 #

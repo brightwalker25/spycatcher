@@ -6,7 +6,7 @@ Run from the repository root:
 
 A command line can be read by any local user through the process list, so the
 scan must not hand a repository path to gitleaks or put one in a notification.
-The test runs bin/security-scan with gitleaks and runuser replaced by
+The test runs bin/spycatcher-scan with gitleaks and runuser replaced by
 stand-ins that record how they were called, against repositories in a
 temporary folder. Nothing reads the real home folder, /etc or /var/log, no
 notification is shown, and nothing is sent anywhere.
@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-scan"
+SCRIPT = ROOT / "bin/spycatcher-scan"
 
 GITLEAKS = """#!/usr/bin/env bash
 [ "$1 $2" = "dir --help" ] && exit 0

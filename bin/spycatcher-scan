@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# Periodic security scans. Driven by security-scan@.service and the
-# security-scan-*.timer units; safe to run by hand for a one-off check.
+# Spycatcher periodic security scans. Driven by spycatcher@.service and the
+# spycatcher-*.timer units; safe to run by hand for a one-off check.
 #
-#   security-scan arch-audit   known CVEs in installed packages
-#   security-scan gitleaks     secrets and private identifiers in SCAN_ROOT repos
-#   security-scan lynis        full system hardening audit
-#   security-scan aide         file-integrity check of system files
-#   security-scan rkhunter     rootkit and suspicious-file check
-#   security-scan models       malicious-pickle check of AI model files
+#   spycatcher-scan arch-audit   known CVEs in installed packages
+#   spycatcher-scan gitleaks     secrets and private identifiers in SCAN_ROOT repos
+#   spycatcher-scan lynis        full system hardening audit
+#   spycatcher-scan aide         file-integrity check of system files
+#   spycatcher-scan rkhunter     rootkit and suspicious-file check
+#   spycatcher-scan models       malicious-pickle check of AI model files
 #
-# `security-report` reads the logs these write and grades them.
+# `spycatcher-report` reads the logs these write and grades them.
 
 set -uo pipefail
 
@@ -22,10 +22,10 @@ case "$MODE" in
     ;;
 esac
 
-: "${SCAN_CONF:=/etc/security-scan/scan.conf}"
-: "${LOG_DIR:=/var/log/security-scan}"
-: "${GITLEAKS_CONFIG:=/etc/security-scan/gitleaks.toml}"
-: "${AIDE_CONFIG:=/etc/security-scan/aide.conf}"
+: "${SCAN_CONF:=/etc/spycatcher/scan.conf}"
+: "${LOG_DIR:=/var/log/spycatcher}"
+: "${GITLEAKS_CONFIG:=/etc/spycatcher/gitleaks.toml}"
+: "${AIDE_CONFIG:=/etc/spycatcher/aide.conf}"
 # How long the AIDE check waits for a running pacman to finish, in seconds.
 : "${PACMAN_WAIT:=600}"
 case "$PACMAN_WAIT" in '' | *[!0-9]*) PACMAN_WAIT=600 ;; esac
@@ -141,7 +141,7 @@ log() { printf '%s\n' "$*" >>"$LOG"; }
 # the log only through log_tool, which shows control characters as "?" and
 # starts every line with "| ". The scan's own lines never start that way.
 log_tool() { LC_ALL=C sed -e 's/[[:cntrl:]]/?/g' -e 's/^/| /' >>"$LOG"; }
-# Python runs, for security-report's checks and the browser policy check,
+# Python runs, for spycatcher-report's checks and the browser policy check,
 # with nothing from the environment but PATH, which systemd or sudo sets for
 # root, and the C locale, so no variable such as GCONV_PATH or
 # GIO_EXTRA_MODULES can steer what a check runs or builds.
@@ -185,7 +185,7 @@ notify() {
   [ -S "$bus" ] || return 0
   runuser -u "$DESKTOP_USER" -- \
     env "DBUS_SESSION_BUS_ADDRESS=unix:path=${bus}" \
-    notify-send -a "Security scan" -u "$urgency" "$(markup "$title")" "$(markup "$body")" \
+    notify-send -a "Spycatcher" -u "$urgency" "$(markup "$title")" "$(markup "$body")" \
     2>/dev/null || true
 }
 
@@ -197,7 +197,7 @@ prune() {
   # An AIDE log that still holds a red nobody has acknowledged is kept, so
   # a red never ages out unseen. If the report cannot say, nothing goes.
   if [ "$MODE" = aide ] && [ -n "$old" ]; then
-    bin="$(dirname -- "$(readlink -f -- "$0")")/security-report"
+    bin="$(dirname -- "$(readlink -f -- "$0")")/spycatcher-report"
     if ! keep=$(env -i PATH="$PATH" LC_ALL=C LOG_DIR="$LOG_DIR" python3 -I "$bin" --keep-logs 2>&1); then
       log "!! could not tell which old logs hold an open red, so none were removed"
       return 0
@@ -218,7 +218,7 @@ arch-audit)
   if ! out=$(arch-audit --color=never 2>&1); then
     log "arch-audit failed (offline?), skipping this run:"
     printf '%s\n' "$out" | log_tool
-    # security-report ignores skipped runs, so the last real result stays in
+    # spycatcher-report ignores skipped runs, so the last real result stays in
     # force and a long offline stretch shows up as a stale scan.
     log "summary: skipped, offline"
     prune
@@ -428,7 +428,7 @@ aide)
   # Every change is graded from a few lookups made once for the whole run,
   # not once per file: one pacman -Ql for who owns each path, one pacman -Qkk
   # over the packages that own a changed file, and one call of
-  # security-report for the rarer explanations. A kernel update changes tens
+  # spycatcher-report for the rarer explanations. A kernel update changes tens
   # of thousands of files, and asking pacman about each in turn took longer
   # than the scan's time limit. The lists live in a private folder of the
   # scan's own temporary directory and are never put on a command line.
@@ -456,7 +456,7 @@ aide)
   # files, so it describes the same system. It grades this run, and is kept
   # with the new baseline, so that the next run can tell which removed files
   # belonged to a package that pacman has since upgraded or removed.
-  owners_ref=/var/lib/security-scan/owners.gz
+  owners_ref=/var/lib/spycatcher/owners.gz
   {
     LC_ALL=C pacman -Ql 2>/dev/null
     echo "$?" >"$work/ql.rc"
@@ -467,10 +467,10 @@ aide)
   # A copy of limine.conf taken before AIDE reads /boot. It becomes the
   # trusted copy that limine_snapshot_change compares against, but only when
   # this run finds nothing red under /boot and the file has not changed since.
-  limine_ref=/var/lib/security-scan/limine.conf
+  limine_ref=/var/lib/spycatcher/limine.conf
   if [ -f /boot/limine.conf ]; then
-    install -d -m 0700 /var/lib/security-scan
-    limine_new=$(mktemp /var/lib/security-scan/limine.conf.XXXXXX) &&
+    install -d -m 0700 /var/lib/spycatcher
+    limine_new=$(mktemp /var/lib/spycatcher/limine.conf.XXXXXX) &&
       cp -f /boot/limine.conf "$limine_new" || limine_new=""
   fi
 
@@ -500,8 +500,8 @@ aide)
   # listed for a human to confirm.
   # A reinstall or downgrade runs the same hooks as an upgrade, so it counts
   # too; leaving it out made a keyring reinstall's boot menu rewrite red.
-  # security-report applies the same rule to RED lines logged before this.
-  # The window is logged so security-report can re-read a red line against
+  # spycatcher-report applies the same rule to RED lines logged before this.
+  # The window is logged so spycatcher-report can re-read a red line against
   # exactly the transactions this count saw.
   last_run=$(stat -c %Y "$db" 2>/dev/null || echo 0)
   since_ts=$(date -d "@${last_run}" '+%Y-%m-%dT%H:%M:%S')
@@ -510,7 +510,7 @@ aide)
   # own copies of the rules only to red lines of logs from earlier versions.
   # 4 since 0.3.0: an unpackaged file in a system code path written while
   # pacman ran is amber, not red.
-  log "graded by security-scan rules 4"
+  log "graded by spycatcher rules 4"
   pacman_since=$(awk -v t="$since_ts" \
     '/\[ALPM\] (upgraded|installed|removed|reinstalled|downgraded) / { ts=substr($1,2,19); if (ts >= t) n++ } END { print n+0 }' \
     /var/log/pacman.log 2>/dev/null)
@@ -598,7 +598,7 @@ aide)
   fi
 
   # Which packages own a file that is still there, and which changed files no
-  # package owns. The second list goes to security-report below.
+  # package owns. The second list goes to spycatcher-report below.
   declare -A need=()
   : >"$work/explain"
   # Folders count too: a folder's mode, owner or type is what AIDE watches
@@ -683,7 +683,7 @@ aide)
   # may have written them. So are those whose only fault is their mode or
   # owner, which a file system without Unix modes, such as a FAT /boot,
   # gives every file, or which a service tightened on its own configuration
-  # file. security-report also checks the hook-rebuilt caches, such as
+  # file. spycatcher-report also checks the hook-rebuilt caches, such as
   # glibc's gconv-modules.cache, against what their tools build now.
   for p in "${!bad_of[@]}"; do
     [ -n "${owner_of[$p]-}" ] &&
@@ -691,14 +691,14 @@ aide)
       printf '%s\037%s\0' "${owner_of[$p]}" "$p" >>"$work/explain"
   done
 
-  # security-report holds these rules, so the scan and the weekly report
+  # spycatcher-report holds these rules, so the scan and the weekly report
   # agree, and reads the paths on standard input: a link made by a package's
   # install script (literal target, or listed in scan.conf's
   # SCRIPTLET_LINKS); a module index depmod rebuilt; a file the package's own
   # install script wrote while pacman installed it; a package file a local
   # hook listed in scan.conf's HOOK_PATCHED patched. scan.conf's lists are
   # not read when the file itself was ignored. Prints "PATH\037REASON\0".
-  report_bin="$(dirname -- "$(readlink -f -- "$0")")/security-report"
+  report_bin="$(dirname -- "$(readlink -f -- "$0")")/spycatcher-report"
   declare -A explained=()
   if [ -s "$work/explain" ] && [ -f "$report_bin" ]; then
     conf_arg=$SCAN_CONF
@@ -707,7 +707,7 @@ aide)
       <"$work/explain" >"$work/explained" 2>"$work/explain.err"
     rc=$?
     if [ "$rc" -ne 0 ]; then
-      log "!! security-report --explain-changes failed (exit ${rc}); the changes it would have explained are graded without it"
+      log "!! spycatcher-report --explain-changes failed (exit ${rc}); the changes it would have explained are graded without it"
       log_tool <"$work/explain.err"
     fi
     # Each record is PATH, GRADE (PKG or AMBER) and REASON.
@@ -719,7 +719,7 @@ aide)
   # Files a package's own install script hands to a group of its own with
   # the setgid bit (1password's browser helper, its op CLI). pacman's file
   # list keeps the packaged group and mode, so pacman reports a GID and
-  # permissions mismatch on every update. security-report does the whole
+  # permissions mismatch on every update. spycatcher-report does the whole
   # check, so the scan and the report agree. Prints the package.
   scriptlet_setgid() {
     [ -f "$report_bin" ] || return 1
@@ -732,7 +732,7 @@ aide)
   # the hook is installed, pacman finds nothing wrong with the file but its
   # content, and the file holds nothing but the browser's own policies and
   # those two switches; any other policy (an extension, a proxy, a
-  # certificate) leaves it red. security-report holds the same check, for
+  # certificate) leaves it red. spycatcher-report holds the same check, for
   # RED lines logged before this one existed; change both together.
   hook_rewrote() {
     case "$1" in
@@ -757,7 +757,7 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
   # only inside the Snapshots sub-menu, with nothing there the trusted copy
   # does not already boot. A kernel command line, kernel or initramfs path or
   # any other entry that differs stays red, and so does everything while
-  # there is no trusted copy yet. The check lives in security-report, which
+  # there is no trusted copy yet. The check lives in spycatcher-report, which
   # holds the one implementation; the report cannot repeat it for older RED
   # lines, because /boot and the trusted copy are readable by root only.
   limine_snapshot_change() {
@@ -769,7 +769,7 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
   # The modules of a kernel that is no longer installed. kernel-modules-hook
   # keeps the running kernel's modules through an upgrade and deletes them
   # after the next boot, outside any pacman run, which used to list thousands
-  # of "unpackaged file removed" lines. security-report decides, once per
+  # of "unpackaged file removed" lines. spycatcher-report decides, once per
   # kernel version; the files are then logged as one line that counts them.
   declare -A kernel_gone=() gone_count=()
   old_kernel() {
@@ -876,7 +876,7 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
             verdict="AMBER ${what} ${path} (not from a package, confirm it was you)"
           else
             # One written while pacman ran is amber through $explanation
-            # above (security-report's written_in_pacman_run()).
+            # above (spycatcher-report's written_in_pacman_run()).
             verdict="RED ${what} ${path} (unpackaged file in a system code path)"
           fi
           ;;
@@ -917,7 +917,7 @@ sys.exit(0 if ok else 1)' "$1" 2>/dev/null && echo zen-privacy-policy ;;
     cp -f "$db" /var/lib/aide/aide.db.prev.gz
     mv -f /var/lib/aide/aide.db.new.gz "$db"
     # The package file lists that go with the new baseline.
-    install -d -m 0700 /var/lib/security-scan
+    install -d -m 0700 /var/lib/spycatcher
     install -m 0600 "$work/owners.gz" "$owners_ref"
   fi
   rm -rf "$work"
@@ -958,7 +958,7 @@ rkhunter)
     fi
     if [ -n "$owner" ] && ! grep -qF " ${f} " <<<"$bad" && [[ "$bad" != *"no mtree file"* ]]; then
       accepted=$((accepted + 1))
-    elif [ -n "$owner" ] && py "$(dirname -- "$(readlink -f -- "$0")")/security-report" \
+    elif [ -n "$owner" ] && py "$(dirname -- "$(readlink -f -- "$0")")/spycatcher-report" \
       --scriptlet-setgid "$f" >/dev/null 2>&1; then
       # Its install script set the group and setgid bit, see scriptlet_setgid.
       accepted=$((accepted + 1))

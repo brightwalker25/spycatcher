@@ -26,15 +26,15 @@ from unittest import mock
 from test_scan_argv import ScanRun
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
+SCRIPT = ROOT / "bin/spycatcher-report"
 QML = [ROOT / "Panel.qml", ROOT / "BarWidget.qml"]
 
 EVIL = '__builtin__ eval <img src="http://attacker.example/x.png"> & "\x1b]0;owned\x07\x1b[2J\u202e'
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
@@ -124,7 +124,7 @@ class ReportOutput(unittest.TestCase):
              mock.patch.object(self.r, "standing", return_value=self.sections[0]), \
              mock.patch.object(self.r, "privacy", return_value=self.sections[0]), \
              mock.patch.object(self.r, "installed_versions", return_value={}), \
-             mock.patch.object(self.r.sys, "argv", ["security-report", "--json"]), \
+             mock.patch.object(self.r.sys, "argv", ["spycatcher-report", "--json"]), \
              mock.patch("builtins.print") as printed:
             self.r.main()
         data = json.loads(printed.call_args[0][0])

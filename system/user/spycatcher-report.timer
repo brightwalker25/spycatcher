@@ -1,5 +1,5 @@
 [Unit]
-Description=Weekly security report, after the Monday scans
+Description=Weekly Spycatcher report, after the Monday scans
 
 [Timer]
 OnCalendar=Mon *-*-* 13:00:00

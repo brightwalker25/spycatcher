@@ -2,7 +2,7 @@
 Description=Daily malicious-pickle check of AI model files (picklescan)
 
 [Timer]
-Unit=security-scan@models.service
+Unit=spycatcher@models.service
 OnCalendar=daily
 RandomizedDelaySec=2h
 Persistent=true

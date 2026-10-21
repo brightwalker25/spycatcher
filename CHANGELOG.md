@@ -1,10 +1,46 @@
 # Changelog
 
-Notable changes to the Security Scan plugin and its scan suite. Versions follow
-[semantic versioning](https://semver.org), and the format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Notable changes to Spycatcher, called Security Scan before 0.4.0, and its scan
+suite. Versions follow [semantic versioning](https://semver.org), and the
+format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
+
+## [0.4.0] - 2026-10-21
+
+### Changed
+
+- Security Scan is now called Spycatcher. It catches signs that someone has
+  been in the machine or has tampered with it: changed system files,
+  rootkits, leaked secrets, poisoned model files and exposed packages.
+  Catching those signs is what the name refers to.
+- Every name follows: the repository is
+  https://github.com/brightwalker25/spycatcher, the plugin id is
+  `brightwalker25.spycatcher`, the programs are `spycatcher-scan`,
+  `spycatcher-report` and `spycatcher-install`, the units are
+  `spycatcher@.service`, `spycatcher-*.timer` and `spycatcher-report.service`
+  and `.timer`, and the folders are `/etc/spycatcher`, `/var/log/spycatcher`,
+  `/var/lib/spycatcher`, `/opt/spycatcher` and `~/.local/share/spycatcher`.
+  `SECURITY_ACKS` is now `SPYCATCHER_ACKS`, the journal tag is
+  `spycatcher-report`, and notifications and the HTML report are headed
+  Spycatcher.
+- AIDE logs record `graded by spycatcher rules N`. The report still reads
+  `graded by security-scan rules N` in older logs.
+
+### Added
+
+- `spycatcher-install` moves an install of Security Scan to the new names:
+  it disables the old timers, renames the configuration, log and state
+  folders and the weekly pages, builds the picklescan environment afresh,
+  replaces the programs and units, regenerates `aide.conf`, re-baselines AIDE
+  so the move is not reported, enables the new timers, and, as the desktop
+  user, renames the plugin link and changes the plugin id in
+  `~/.config/omarchy/shell.json` while keeping the widget's settings. It
+  refuses when an old and a new folder both hold files, or while a scan under
+  the old name is running. Each step skips what is already done, so a second
+  or interrupted run carries on, and `--dry-run` prints the whole move.
+  `--final-check` runs one last AIDE check under the old names first.
+- The uninstaller lists anything still under the old names.
 
 ## [0.3.0] - 2026-10-21
 

@@ -21,7 +21,7 @@ import qs.Ui
 // happens. Re-reading it is cheap, so the bar does so on a timer.
 BarWidget {
   id: root
-  moduleName: "brightwalker25.security-scan"
+  moduleName: "brightwalker25.spycatcher"
 
   readonly property bool hideWhenGreen: setting("hideWhenGreen", false) === true
 

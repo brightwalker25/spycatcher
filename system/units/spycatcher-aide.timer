@@ -2,7 +2,7 @@
 Description=Daily file-integrity check of system files (AIDE)
 
 [Timer]
-Unit=security-scan@aide.service
+Unit=spycatcher@aide.service
 OnCalendar=daily
 RandomizedDelaySec=2h
 Persistent=true

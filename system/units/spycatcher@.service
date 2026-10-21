@@ -1,12 +1,12 @@
 [Unit]
-Description=Security scan (%i)
-Documentation=file:/usr/local/bin/security-scan
+Description=Spycatcher scan (%i)
+Documentation=file:/usr/local/bin/spycatcher-scan
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/security-scan %i
+ExecStart=/usr/local/bin/spycatcher-scan %i
 TimeoutStartSec=45min
 
 # Background work: never compete with the desktop for CPU or disk.

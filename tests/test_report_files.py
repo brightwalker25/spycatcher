@@ -1,4 +1,4 @@
-"""Checks that security-report keeps what it finds to the desktop user.
+"""Checks that spycatcher-report keeps what it finds to the desktop user.
 
 Run from the repository root:
 
@@ -28,12 +28,12 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
+SCRIPT = ROOT / "bin/spycatcher-report"
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
@@ -56,7 +56,7 @@ class HtmlReportFiles(unittest.TestCase):
         self.home.mkdir()
         self.logs = Path(self.tmp.name) / "logs"
         self.logs.mkdir()
-        self.dir = self.home / ".local/share/security-report"
+        self.dir = self.home / ".local/share/spycatcher"
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -180,7 +180,7 @@ class GitleaksSection(unittest.TestCase):
         self.tmp.cleanup()
 
     def scan(self, *repos, total=None):
-        """A gitleaks log as security-scan writes it, one block per
+        """A gitleaks log as spycatcher-scan writes it, one block per
         (path, rule) pair."""
         lines = ["=== gitleaks run at 2026-10-12T03:00:00+01:00 ==="]
         for path, rule in repos:

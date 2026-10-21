@@ -1,5 +1,5 @@
 # Pinned, hash-checked requirements for the picklescan tool that
-# bin/security-scan-install puts in /opt/security-scan/picklescan. The
+# bin/spycatcher-install puts in /opt/spycatcher/picklescan. The
 # installer runs as root and installs with --require-hashes and
 # --only-binary :all:, so only these exact wheels can be installed and no
 # build step runs.

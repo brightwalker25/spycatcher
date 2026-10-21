@@ -10,7 +10,7 @@ import qs.Ui
 // Hansson). See LICENSE for the full notice.
 
 // The panel behind the bar lock: the overall rating, one block per section
-// of the weekly security report, and for every finding that is not green,
+// of the weekly Spycatcher report, and for every finding that is not green,
 // what it is, why it matters here, and what is being done about it.
 //
 // Every Text here shows its string as plain text (textFormat: Text.PlainText).
@@ -19,15 +19,15 @@ import qs.Ui
 // Qt's default format guesses at rich text, and rich text can load an image
 // from any URL, so a crafted name could make the desktop fetch a page.
 //
-// It renders whatever `security-report --json` hands it and decides nothing
+// It renders whatever `spycatcher-report --json` hands it and decides nothing
 // itself. Every judgement, what counts as amber, when a quiet scan becomes a
 // finding, which known issues are managed, is made in that script and its
 // risk register, both of which work from a terminal with no compositor
 // involved. The panel's only job is to draw the verdict.
 Panel {
   id: root
-  moduleName: "brightwalker25.security-scan"
-  ipcTarget: "brightwalker25.security-scan"
+  moduleName: "brightwalker25.spycatcher"
+  ipcTarget: "brightwalker25.spycatcher"
   manageIpc: false
 
   property var anchorItem: null
@@ -79,9 +79,9 @@ Panel {
   // markup is made of are removed as well, in case a shell version renders
   // it differently.
   readonly property string tooltip: {
-    if (root.rep) return "Security report: " + root.overall.toUpperCase() + ". "
+    if (root.rep) return "Spycatcher report: " + root.overall.toUpperCase() + ". "
       + String(root.rep.line || "").replace(/[<>&]/g, "")
-    if (root.error !== "") return "Security report unavailable"
+    if (root.error !== "") return "Spycatcher report unavailable"
     return ""
   }
 
@@ -89,10 +89,10 @@ Panel {
   // /usr/local/bin is preferred because that is the one the scans were set up
   // with, but an older install may predate --json, so the collector checks
   // for the flag before using it and falls back to the bundled copy.
-  readonly property string bundled: String(Qt.resolvedUrl("bin/security-report")).replace(/^file:\/\//, "")
+  readonly property string bundled: String(Qt.resolvedUrl("bin/spycatcher-report")).replace(/^file:\/\//, "")
 
   readonly property string collectScript:
-    'r=/usr/local/bin/security-report; ' +
+    'r=/usr/local/bin/spycatcher-report; ' +
     'if [ -x "$r" ] && grep -q -- --json "$r"; then exec "$r" --json --days "$2"; fi; ' +
     'exec "$1" --json --days "$2"'
 
@@ -101,8 +101,8 @@ Panel {
   // new one is checked for instead. If it could not be written, the last page
   // the weekly timer produced is opened, which is better than nothing.
   readonly property string openScript:
-    'r=/usr/local/bin/security-report; [ -x "$r" ] || r=$1; ' +
-    'd="$HOME/.local/share/security-report"; out="$d/latest-widget.html"; ' +
+    'r=/usr/local/bin/spycatcher-report; [ -x "$r" ] || r=$1; ' +
+    'd="$HOME/.local/share/spycatcher"; out="$d/latest-widget.html"; ' +
     'rm -f "$out"; "$r" --html "$out" --days "$2" >/dev/null 2>&1; ' +
     'if [ -s "$out" ]; then exec xdg-open "$out"; fi; ' +
     'exec xdg-open "$d/latest.html"'
@@ -160,7 +160,7 @@ Panel {
       root.checking = false
       if (exitCode > 1) {
         root.rep = null
-        root.error = "security-report exited " + exitCode
+        root.error = "spycatcher-report exited " + exitCode
       }
     }
   }
@@ -529,7 +529,7 @@ Panel {
               Text {
                 textFormat: Text.PlainText
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Security report"
+                text: "Spycatcher report"
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.body

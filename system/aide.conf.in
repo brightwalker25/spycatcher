@@ -1,8 +1,8 @@
-# AIDE file-integrity baseline for security-scan. Driven by
-# `security-scan aide`, which checks, explains changes against pacman,
+# AIDE file-integrity baseline for spycatcher-scan. Driven by
+# `spycatcher-scan aide`, which checks, explains changes against pacman,
 # then re-baselines. Edit here, not /etc/aide.conf (the package default).
 #
-# security-scan-install writes /etc/security-scan/aide.conf from the template
+# spycatcher-install writes /etc/spycatcher/aide.conf from the template
 # aide.conf.in, filling in the desktop user's home folder. The folder is
 # regex-escaped, since AIDE reads these paths as regular expressions. The
 # installed file is replaced on every install, so edit the template instead.
@@ -72,8 +72,8 @@ Dirs   = p+u+g+acl+xattrs+ftype
 # Rewritten with fresh random bytes at every boot and shutdown; its content
 # is meant to change and says nothing about integrity.
 !/boot/loader/random-seed$
-# Written by `sudo security-report --ack`. The report lists every
+# Written by `sudo spycatcher-report --ack`. The report lists every
 # acknowledgement it holds, so one nobody made shows there, and a change to it
 # here would only raise an amber for each acknowledgement.
-!/etc/security-scan/acknowledged\.json$
-!/opt/security-scan/picklescan/.*/__pycache__/
+!/etc/spycatcher/acknowledged\.json$
+!/opt/spycatcher/picklescan/.*/__pycache__/

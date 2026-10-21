@@ -1,4 +1,4 @@
-# Local overrides for rkhunter, driven by `security-scan rkhunter`.
+# Local overrides for rkhunter, driven by `spycatcher-scan rkhunter`.
 # Installed as /etc/rkhunter.conf.local only when that file does not exist.
 # The entries below are true of a stock Arch install. Check any new entry by
 # hand, for example with pacman -Qkk, before allowing it.
@@ -26,5 +26,5 @@ ALLOW_SSH_ROOT_USER=unset
 ALLOW_SSH_PROT_V1=2
 
 # rkhunter has no pacman support (PKGMGR knows only RPM, DPKG, BSD, SOLARIS).
-# `security-scan rkhunter` instead verifies changed files with pacman -Qkk and
+# `spycatcher-scan rkhunter` instead verifies changed files with pacman -Qkk and
 # re-records properties only when pacman vouches for them.

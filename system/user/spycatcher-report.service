@@ -1,0 +1,20 @@
+[Unit]
+Description=Weekly Spycatcher report from the spycatcher-scan logs
+Documentation=file:/usr/local/bin/spycatcher-report
+
+[Service]
+Type=oneshot
+# Written as a dated page so past weeks stay comparable; latest.html always
+# points at the newest. The notification's Open action shows it.
+ExecStart=/bin/sh -c '\
+  dir="$HOME/.local/share/spycatcher"; \
+  page="$dir/report-$(date +%%Y-%%m-%%d).html"; \
+  /usr/local/bin/spycatcher-report --html "$page" >/dev/null; \
+  ln -sf "$page" "$dir/latest.html"; \
+  status=$(/usr/local/bin/spycatcher-report --status); \
+  case "$status" in RED*) u=critical;; *) u=normal;; esac; \
+  act=$(timeout 12h notify-send -a "Spycatcher" -u "$u" -A open=Open \
+    "Weekly Spycatcher report: $${status%%%%:*}" "$${status#*: }"); \
+  [ "$act" = open ] && xdg-open "$page"; \
+  exit 0'
+TimeoutStartSec=13h

@@ -1,6 +1,10 @@
-# omarchy-security-scan
+# Spycatcher
 
-A scheduled security-scan suite for Arch and Omarchy, and a bar widget that
+Spycatcher catches signs that someone has been in the machine or has tampered
+with it: changed system files, rootkits, leaked secrets, poisoned model files
+and exposed packages. Catching those signs is what the name refers to.
+
+It is a scheduled scan suite for Arch and Omarchy, and a bar widget that
 shows its verdict. Six scans run in the background on systemd timers, a report
 grades what they found green, amber or red, and a lock in the bar takes the
 same colour. Click the lock and the panel lists
@@ -16,10 +20,10 @@ a CVE the Arch tracker still lists after the fix shipped), and grades what is
 left.
 
 ```bash
-git clone https://github.com/brightwalker25/omarchy-security-scan.git ~/Work/omarchy-security-scan
-sudo ~/Work/omarchy-security-scan/bin/security-scan-install
-ln -s ~/Work/omarchy-security-scan ~/.config/omarchy/plugins/brightwalker25.security-scan
-omarchy plugin enable brightwalker25.security-scan --section right
+git clone https://github.com/brightwalker25/spycatcher.git ~/Work/spycatcher
+sudo ~/Work/spycatcher/bin/spycatcher-install
+ln -s ~/Work/spycatcher ~/.config/omarchy/plugins/brightwalker25.spycatcher
+omarchy plugin enable brightwalker25.spycatcher --section right
 ```
 
 The scans need root, so they are installed by a privileged installer rather
@@ -28,12 +32,24 @@ itself. [INSTALL.md](INSTALL.md) covers the requirements, what the installer
 changes, the first-run baselines, the configuration files, running scans by
 hand, and uninstalling.
 
+## Moving from Security Scan
+
+Before 0.4.0 this project was called Security Scan, with the plugin id
+`brightwalker25.security-scan`, the programs `security-scan` and
+`security-report`, and folders named `security-scan`. Running the new
+installer over such an install moves it to the new names: it renames the
+configuration, logs, state and weekly pages, replaces the programs and units,
+re-baselines AIDE so that the move is not reported, renames the plugin link
+and changes the plugin id in `~/.config/omarchy/shell.json`, keeping the
+widget's settings. Check it first with `--dry-run`, then restart the shell.
+[INSTALL.md](INSTALL.md#moving-from-security-scan) describes each step.
+
 ## Removing
 
 ```bash
-sudo ~/Work/omarchy-security-scan/bin/security-scan-install --uninstall
-omarchy plugin disable brightwalker25.security-scan
-rm ~/.config/omarchy/plugins/brightwalker25.security-scan
+sudo ~/Work/spycatcher/bin/spycatcher-install --uninstall
+omarchy plugin disable brightwalker25.spycatcher
+rm ~/.config/omarchy/plugins/brightwalker25.spycatcher
 ```
 
 The uninstaller removes only the units and programs this plugin installed,
@@ -71,17 +87,17 @@ report that repeats the same old finding every week teaches you to ignore it.
 
 ## Design
 
-A shell script, `security-scan`, runs one scan and writes a log with a
+A shell script, `spycatcher-scan`, runs one scan and writes a log with a
 `summary:` line and, where it can, a verdict on each line it found. A Python
-script, `security-report`, reads those logs and a hand-written risk register
+script, `spycatcher-report`, reads those logs and a hand-written risk register
 and grades the result. The bar widget and panel render the report's JSON and
 decide nothing. All of the judgement is in the two scripts, and both run from a
 terminal:
 
 ```bash
-security-report                # the report in colour
-security-report --all          # with the green items listed too
-security-report --json         # what the widget reads
+spycatcher-report                # the report in colour
+spycatcher-report --all          # with the green items listed too
+spycatcher-report --json         # what the widget reads
 ```
 
 ### How findings are graded
@@ -115,17 +131,17 @@ have checked it.
   that clears it:
 
   ```bash
-  sudo security-report --ack 3f9a1c2b --reason "kernel-modules-hook backup"
-  sudo security-report --ack amber --reason "my edits this week"   # every amber item
-  security-report --acks            # what has been acknowledged
-  sudo security-report --unack 3f9a1c2b
+  sudo spycatcher-report --ack 3f9a1c2b --reason "kernel-modules-hook backup"
+  sudo spycatcher-report --ack amber --reason "my edits this week"   # every amber item
+  spycatcher-report --acks            # what has been acknowledged
+  sudo spycatcher-report --unack 3f9a1c2b
   ```
 
   An acknowledgement needs root, so nothing running as you can silence a red.
   `--ack` lists how many files it covers in each folder before it records
   them. It records each file of the item in the state it is in now (for a
   file, its inode, size and change time; for a link, its target; for a
-  folder, its mode and owner) in `/etc/security-scan/acknowledged.json`,
+  folder, its mode and owner) in `/etc/spycatcher/acknowledged.json`,
   readable by you and root, and notes it in the journal. It covers only what
   was logged before it, and only while the file is in that state: a file
   that changes again, or that a later check logs again, is a new finding.
@@ -189,7 +205,7 @@ A package CVE or a gitleaks finding is only as serious as its circumstances on
 this machine. A vulnerability in a library that nothing reachable uses is not
 the same as one in the SSH server. The report cannot know the difference, so
 the difference is written down by hand in a risk register,
-`/etc/security-scan/risk-register.toml`. Each entry records what the finding
+`/etc/spycatcher/risk-register.toml`. Each entry records what the finding
 is, what it means here, how confident the assessment is, the rating it
 deserves, and what is being done about it. The report shows that text in place
 of the raw finding.
@@ -244,7 +260,7 @@ red when that happens.
 ### AIDE explains changes before it reports them
 
 A plain AIDE report on a rolling-release system is mostly package upgrades,
-and after a large upgrade it runs to thousands of lines. `security-scan aide`
+and after a large upgrade it runs to thousands of lines. `spycatcher-scan aide`
 explains each change before it is reported:
 
 - A file owned by a package that `pacman -Qkk` still verifies (content, size,
@@ -264,7 +280,7 @@ explains each change before it is reported:
 - A removed file is a package change when it belonged to a package, at the
   last check, that pacman has since upgraded, removed, reinstalled or
   downgraded. Each check keeps the package file lists beside the AIDE
-  baseline for this, in `/var/lib/security-scan/owners.gz`, readable by root
+  baseline for this, in `/var/lib/spycatcher/owners.gz`, readable by root
   only. Any other removed file is amber, including one that pacman still
   lists for an installed package.
 - The modules of a kernel that is no longer installed are one package-change
@@ -335,7 +351,7 @@ explains each change before it is reported:
   only the snapshot's own subvolume swapped in, and a kernel image the
   trusted copy already boots. Any other difference, such as a changed kernel
   command line, kernel or initramfs path, or a new entry, stays red. The
-  trusted copy is kept in `/var/lib/security-scan`, readable by root only,
+  trusted copy is kept in `/var/lib/spycatcher`, readable by root only,
   and is refreshed after each check that finds nothing red under `/boot`.
   Until the first check has made it, every such change stays red. The
   weekly report cannot repeat this check for a red line logged earlier,
@@ -407,7 +423,7 @@ a new line, is red as AIDE wrote it.
 
 The changes are graded from one `pacman -Ql` of every installed package's
 files, taken just before AIDE reads the system, one `pacman -Qkk` over the
-packages that own a changed file, and one call of `security-report` for the
+packages that own a changed file, and one call of `spycatcher-report` for the
 rules above that need it, never from one pacman call per file. A kernel
 update changes tens of thousands of files, which takes seconds this way. The
 lists are kept in the scan's private temporary folder and no path reaches a
@@ -441,7 +457,7 @@ hundreds.
 
 rkhunter records the properties of system binaries and warns when they change.
 It has no pacman support, so after every upgrade it warns about every binary
-the upgrade replaced. `security-scan rkhunter` checks each file named in that
+the upgrade replaced. `spycatcher-scan rkhunter` checks each file named in that
 warning with `pacman -Qkk`. If every one of them is owned by a package and
 matches it byte for byte, the warning is accepted and rkhunter's record is
 updated. If any one of them cannot be verified, nothing is accepted, the record
@@ -513,14 +529,14 @@ characters and text-reordering marks as `?`, and desktop notifications write
 The panel can also be driven over IPC, for example from a key binding:
 
 ```bash
-omarchy-shell brightwalker25.security-scan toggle
-omarchy-shell brightwalker25.security-scan refresh
+omarchy-shell brightwalker25.spycatcher toggle
+omarchy-shell brightwalker25.spycatcher refresh
 ```
 
 ## The weekly report
 
 On Monday at 13:00, after the Monday scans, a user timer writes the report as a
-self-contained HTML page in `~/.local/share/security-report/`, named by date so
+self-contained HTML page in `~/.local/share/spycatcher/`, named by date so
 that past weeks stay comparable, and points `latest.html` at it. The folder
 and its pages are readable by you alone. It then sends
 a desktop notification with the overall rating and the summary line. The
@@ -613,11 +629,12 @@ bash tests/sandbox-install.sh
 ```
 
 This runs the installer, and the installers of earlier releases, as your own
-user against a temporary folder that stands in for `/`, with `pacman`,
-`systemctl`, `uv` and the other system commands replaced by stand-ins. It
-checks fresh installs, upgrades from each release, uninstalls, and that files
-the plugin did not write are refused and left unchanged. It needs no root and
-changes nothing outside the temporary folder.
+user against a temporary folder that stands in for `/` and for your home
+folder, with `pacman`, `systemctl`, `aide`, `uv` and the other system commands
+replaced by stand-ins. It checks fresh installs, the move from each Security
+Scan release to the new names (run twice, and as a dry run), uninstalls, and
+that files the plugin did not write are refused and left unchanged. It needs
+no root and changes nothing outside the temporary folder.
 
 ## Settings
 
@@ -628,7 +645,7 @@ changes nothing outside the temporary folder.
 | `hideWhenGreen` | false | Hide the lock when the report is green, so it shows only when it is amber or red |
 
 These affect only the widget. The scans run on their own timers whatever the
-widget is set to. The scan settings live in `/etc/security-scan`; see
+widget is set to. The scan settings live in `/etc/spycatcher`; see
 [INSTALL.md](INSTALL.md#configuration).
 
 ## Requirements

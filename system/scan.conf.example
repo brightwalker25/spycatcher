@@ -1,12 +1,12 @@
-# Settings for security-scan, installed as /etc/security-scan/scan.conf.
+# Settings for spycatcher-scan, installed as /etc/spycatcher/scan.conf.
 #
 # This file is sourced by a script that runs as root, so it must be owned by
-# root and not writable by anyone else; security-scan ignores it otherwise.
+# root and not writable by anyone else; spycatcher-scan ignores it otherwise.
 # The installer fills in @USER@ and @HOME@ from the account that ran sudo.
 # A variable set in the environment overrides the value here for that run.
 
 # The account that receives desktop notifications and may read the logs in
-# /var/log/security-scan. The scans refuse to run without it rather than
+# /var/log/spycatcher. The scans refuse to run without it rather than
 # guess, because a guess could notify the wrong person.
 DESKTOP_USER="@USER@"
 

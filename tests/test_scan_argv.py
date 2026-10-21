@@ -8,7 +8,7 @@ Run from the repository root:
 A command line can be read by any local user through the process list, so no
 command the scan starts may be handed a path inside the desktop user's home
 folder, a repository name or a finding. The tests run a copy of
-bin/security-scan with the scanners, pacman, getent and runuser replaced by
+bin/spycatcher-scan with the scanners, pacman, getent and runuser replaced by
 stand-ins, and every other command it uses wrapped so its arguments are
 recorded before the real command runs. The home folder is a temporary one;
 system paths the scan reads or writes (/var/lib/aide, /var/log/pacman.log and
@@ -25,7 +25,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-scan"
+SCRIPT = ROOT / "bin/spycatcher-scan"
 
 # Real commands the scan runs, wrapped to record their arguments.
 WRAPPED = ("awk basename cat cmp cp cut date dirname env find grep head id install ls "
@@ -135,12 +135,12 @@ class ScanRun(unittest.TestCase):
         # Point the system paths the scan uses into the temporary folder.
         text = SCRIPT.read_text()
         for old, new in (("/var/lib/aide", self.state / "aide"),
-                         ("/var/lib/security-scan", self.state / "scan"),
+                         ("/var/lib/spycatcher", self.state / "scan"),
                          ("/boot/limine.conf", self.state / "no-limine.conf"),
                          ("/var/log/pacman.log", self.state / "pacman.log")):
             self.assertIn(old, text)
             text = text.replace(old, str(new))
-        self.script = base / "scan/security-scan"
+        self.script = base / "scan/spycatcher-scan"
         self.script.write_text(text)
         (self.state / "pacman.log").write_text("")
 

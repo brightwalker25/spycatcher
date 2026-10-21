@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Installer for the periodic security scans and the weekly report.
+# Installer for the Spycatcher scans and the weekly report.
 # Idempotent: safe to re-run after pulling a new version of this repo.
 #
-#   sudo bin/security-scan-install              install or update
-#   sudo bin/security-scan-install --uninstall  remove units and programs
-#   bin/security-scan-install --dry-run         print every action, change nothing
+#   sudo bin/spycatcher-install                 install, update, or move an
+#                                               install of Security Scan
+#   sudo bin/spycatcher-install --final-check   the same, but run one last AIDE
+#                                               check under the old names first
+#   sudo bin/spycatcher-install --uninstall     remove units and programs
+#   bin/spycatcher-install --dry-run            print every action, change nothing
 #
 # The desktop user is the account that ran sudo. Pass --user NAME to choose
 # another one, or when running from a root shell.
@@ -13,21 +16,27 @@
 # removed only when it is this plugin's own. Every path is checked before
 # anything changes, and if one holds something else the installer lists it
 # and stops, leaving the machine as it was. See "Ownership" below.
+#
+# Until 0.4.0 this project was called Security Scan. An install under that
+# name is moved to the new names by this installer; see "The earlier name"
+# below.
 
 set -euo pipefail
 
 usage() {
-  echo "usage: ${0##*/} [--dry-run] [--uninstall] [--user NAME]" >&2
+  echo "usage: ${0##*/} [--dry-run] [--uninstall] [--final-check] [--user NAME]" >&2
   exit 2
 }
 
 DRY=0
 UNINSTALL=0
+FINAL_CHECK=0
 TARGET_USER=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1 ;;
     --uninstall) UNINSTALL=1 ;;
+    --final-check) FINAL_CHECK=1 ;;
     --user)
       [ $# -ge 2 ] || usage
       TARGET_USER="$2"
@@ -46,26 +55,48 @@ ROOT_UID=0
 UNIT_DIR=/etc/systemd/system
 USER_UNIT_DIR=/etc/systemd/user
 BIN_DIR=/usr/local/bin
-OPT=/opt/security-scan
+OPT=/opt/spycatcher
 PICKLE_VENV="$OPT/picklescan"
-# Versions up to 0.2.1 installed picklescan with uv tool into this folder.
-LEGACY_TOOL_DIR="$OPT/tools"
 PICKLE_REQS="$SRC/system/picklescan-requirements.txt"
-ETC=/etc/security-scan
+ETC=/etc/spycatcher
+LOG_DIR=/var/log/spycatcher
+LIB_DIR=/var/lib/spycatcher
 RKH_LOCAL=/etc/rkhunter.conf.local
 AIDE_DB=/var/lib/aide/aide.db.gz
 RKH_DB=/var/lib/rkhunter/db/rkhunter.dat
 RUN_USER=/run/user
 TIMERS=(arch-audit aide gitleaks lynis models rkhunter)
-PROGRAMS=(security-scan security-report)
+PROGRAMS=(spycatcher-scan spycatcher-report)
+PLUGIN_ID=brightwalker25.spycatcher
 NOTES=()
 
 # The exact units this plugin installs. Install, upgrade and uninstall touch
 # these names and no others, so a unit an administrator added under a similar
-# name, such as security-scan-foo.timer, is never replaced or removed.
-SYSTEM_UNITS=(security-scan@.service)
-for t in "${TIMERS[@]}"; do SYSTEM_UNITS+=("security-scan-${t}.timer"); done
-USER_UNITS=(security-report.service security-report.timer)
+# name, such as spycatcher-foo.timer, is never replaced or removed.
+SYSTEM_UNITS=(spycatcher@.service)
+for t in "${TIMERS[@]}"; do SYSTEM_UNITS+=("spycatcher-${t}.timer"); done
+USER_UNITS=(spycatcher-report.service spycatcher-report.timer)
+
+# The names this project had before 0.4.0, when it was called Security Scan.
+# The installer moves an install under these names to the ones above, and
+# never writes anything new under them.
+OLD_OPT=/opt/security-scan
+OLD_PICKLE_VENV="$OLD_OPT/picklescan"
+# Versions up to 0.2.1 installed picklescan with uv tool into this folder.
+LEGACY_TOOL_DIR="$OLD_OPT/tools"
+OLD_ETC=/etc/security-scan
+OLD_LOG_DIR=/var/log/security-scan
+OLD_LIB_DIR=/var/lib/security-scan
+OLD_PROGRAMS=(security-scan security-report)
+OLD_SYSTEM_UNITS=(security-scan@.service)
+for t in "${TIMERS[@]}"; do OLD_SYSTEM_UNITS+=("security-scan-${t}.timer"); done
+OLD_USER_UNITS=(security-report.service security-report.timer)
+OLD_PLUGIN_ID=brightwalker25.security-scan
+# Written while a move from the old names is under way, so that a run that
+# was interrupted still re-baselines AIDE when it is run again, and replaced
+# by MIGRATED_MARKER once the move is complete.
+MIGRATION_PENDING="$LIB_DIR/.migration-pending"
+MIGRATED_MARKER="$LIB_DIR/.migrated-from-security-scan"
 
 # A dry run only reads, so it is allowed without root. That makes it possible
 # to check what the installer would do before handing it root.
@@ -172,9 +203,10 @@ trap 'exit 143' TERM
 # The copy in this checkout is recognised by hashing it, so it needs no entry.
 # When a unit changes, the hash of the version it replaces is added here;
 # tests/sandbox-install.sh fails until every version in the git history is
-# listed.
+# listed. The units of Security Scan, this project's name before 0.4.0, are
+# listed under their old names, which is how an old install is recognised.
 declare -A SHIPPED_UNIT_SHA256=(
-  # 0.2.1 to 0.2.8; no unit has changed since 0.2.1
+  # Security Scan 0.2.1 to 0.3.0; no unit changed between those releases
   [security-scan@.service]=de45e9ebff29f23da54b1d1726dd0b84ed91f2732d145b0483a67e2cf1769452
   [security-scan-aide.timer]=f3f4f428cc6295d1f97b62f086a8ef16fb00a13af885cd60b52f0efecc6bd8c3
   [security-scan-arch-audit.timer]=7876ce1ffba23c6116d7f1c0854a74e917a4e4b2342b16fa942655d54503f018
@@ -186,7 +218,11 @@ declare -A SHIPPED_UNIT_SHA256=(
   [security-report.timer]=7b72a4ab2f5cb2d43d802ee0106e2c977225022f7c10d35b02fc5d04abf8c500
 )
 
+# The second line of each program, under its current name and under the
+# name it had before 0.4.0.
 declare -A PROGRAM_SIGNATURE=(
+  [spycatcher-scan]='# Spycatcher periodic security scans. Driven by spycatcher@.service and the'
+  [spycatcher-report]='"""Spycatcher report: grades the spycatcher-scan logs red, amber, green.'
   [security-scan]='# Periodic security scans. Driven by security-scan@.service and the'
   [security-report]='"""Weekly security report: grades the security-scan logs red, amber, green.'
 )
@@ -195,10 +231,11 @@ root_owned() { [ "$(stat -c %u -- "$1" 2>/dev/null)" = "$ROOT_UID" ]; }
 sha256_of() { sha256sum -- "$1" 2>/dev/null | cut -d' ' -f1; }
 present() { [ -e "$1" ] || [ -L "$1" ]; }
 
-# The shipped copy of a unit, by name.
+# The shipped copy of a unit, by name. A unit under its old name has none in
+# this checkout, so it is recognised by SHIPPED_UNIT_SHA256 alone.
 unit_source() {
   case "$1" in
-    security-report.*) printf '%s\n' "$SRC/system/user/$1" ;;
+    spycatcher-report.* | security-report.*) printf '%s\n' "$SRC/system/user/$1" ;;
     *) printf '%s\n' "$SRC/system/units/$1" ;;
   esac
 }
@@ -231,9 +268,10 @@ program_ours() {
   [ -f "$path" ] && root_owned "$path" && has_signature "$path" "$name"
 }
 
-# The picklescan link is ours when it points into this plugin's folder in /opt.
+# The picklescan link is ours when it points into this plugin's folder in
+# /opt, under either name.
 picklescan_link_ours() {
-  [ -L "$1" ] && [[ "$(readlink -- "$1")" == "$OPT"/* ]]
+  [ -L "$1" ] && [[ "$(readlink -- "$1")" == "$OPT"/* || "$(readlink -- "$1")" == "$OLD_OPT"/* ]]
 }
 
 # A real, root-owned folder that only root can write to: not a symlink, which
@@ -244,15 +282,26 @@ real_root_dir() {
     [ $((8#$(stat -c %a -- "$1") & 8#022)) -eq 0 ]
 }
 
+# 0 when a folder is empty, 1 when it holds anything, 2 when it cannot be
+# read, which happens only in a dry run without root.
+dir_empty() {
+  local out
+  out=$(ls -A -- "$1" 2>/dev/null) || return 2
+  [ -z "$out" ]
+}
+
 # The picklescan environment is ours when it is a real, root-owned folder that
 # is a Python virtual environment and either carries the marker this
 # installer writes when it makes the environment, or has picklescan installed
 # in it, as every earlier release left it. uv venv --clear empties it, so any
-# other environment at that path must not be handed to it.
-VENV_MARKER=".security-scan-installer"
+# other environment at that path must not be handed to it. Before 0.4.0 the
+# marker had the project's earlier name.
+VENV_MARKER=".spycatcher-installer"
+OLD_VENV_MARKER=".security-scan-installer"
 venv_ours() {
   real_root_dir "$1" && [ -f "$1/pyvenv.cfg" ] && [ ! -L "$1/pyvenv.cfg" ] && {
     { [ -f "$1/$VENV_MARKER" ] && [ ! -L "$1/$VENV_MARKER" ]; } ||
+      { [ -f "$1/$OLD_VENV_MARKER" ] && [ ! -L "$1/$OLD_VENV_MARKER" ]; } ||
       compgen -G "$1/lib/python*/site-packages/picklescan-*.dist-info" >/dev/null
   }
 }
@@ -281,6 +330,17 @@ remove_legacy_tools() {
   done
   rm -f "$dir/.lock" "$dir/.gitignore" 2>/dev/null || true
   rmdir "$dir" 2>/dev/null || echo "  ${dir} could not be removed; left in place"
+}
+
+# Remove a folder of this plugin's in /opt once nothing is left in it.
+rmdir_if_empty() {
+  if [ "$DRY" -eq 1 ]; then
+    echo "  rmdir $1 (if it is now empty)"
+  elif rmdir "$1" 2>/dev/null; then
+    echo "  rmdir $1"
+  else
+    return 1
+  fi
 }
 
 # Why a path was not accepted, for the lists printed on stderr.
@@ -397,7 +457,96 @@ as_user() {
     "DBUS_SESSION_BUS_ADDRESS=unix:path=${BUS}" "$@"
 }
 
+# The desktop user's own files that the move from the old names touches. Each
+# change to them is made as that user, never as root.
+REPORT_DIR="${TARGET_HOME}/.local/share/spycatcher"
+OLD_REPORT_DIR="${TARGET_HOME}/.local/share/security-report"
+PLUGINS_DIR="${TARGET_HOME}/.config/omarchy/plugins"
+SHELL_JSON="${TARGET_HOME}/.config/omarchy/shell.json"
+
 say "desktop user: ${TARGET_USER} (${TARGET_HOME})"
+
+# ---------------------------------------------------------------------------
+# The earlier name
+# ---------------------------------------------------------------------------
+#
+# Spycatcher was called Security Scan before 0.4.0, with programs, units and
+# folders under that name. Run over such an install, this installer moves it:
+#
+#  1. With --final-check, it runs one last AIDE check under the old names, so
+#     that changes made since the last daily check are reported before the
+#     move. This is off by default, because an AIDE check reads every watched
+#     file and takes several minutes; without it, those changes go into the
+#     new baseline in step 8 unreported.
+#  2. It stops and disables the old timers, and the old weekly report timer
+#     for every user.
+#  3. It renames /etc, /var/log and /var/lib/security-scan to the new names,
+#     each only when the old folder exists and the new one does not (or is
+#     empty), and renames the user's report folder as the user, pointing
+#     latest.html at the moved page. The preflight refuses when an old and a
+#     new folder both hold files.
+#  4. It builds the picklescan environment afresh in /opt/spycatcher, points
+#     /usr/local/bin/picklescan at it, and only then removes the old one.
+#  5. It installs the new programs and units, then removes the old ones, each
+#     only when it passes the ownership checks above.
+#  6. It regenerates aide.conf, which now leaves out the new paths.
+#  7. It enables the new timers.
+#  8. It re-baselines AIDE, so the move itself is not reported as changes.
+#  9. As the user, it renames the plugin link and rewrites the plugin id in
+#     ~/.config/omarchy/shell.json, keeping every other entry and setting.
+#
+# Each step looks at the state it changes and does nothing when that is
+# already done, so a second run, or a run after an interrupted one, carries
+# on from where the first stopped. MIGRATION_PENDING records that the move
+# has begun, so step 8 still runs after an interruption.
+
+old_dirs=("$OLD_ETC" "$OLD_LOG_DIR" "$OLD_LIB_DIR")
+new_dirs=("$ETC" "$LOG_DIR" "$LIB_DIR")
+
+# Whether anything of an install under the old names is on the system side.
+old_system_install() {
+  local u p d
+  for u in "${OLD_SYSTEM_UNITS[@]/#/${UNIT_DIR}/}" "${OLD_USER_UNITS[@]/#/${USER_UNIT_DIR}/}"; do
+    unit_ours "$u" && return 0
+  done
+  for p in "${OLD_PROGRAMS[@]/#/${BIN_DIR}/}"; do
+    program_ours "$p" && return 0
+  done
+  for d in "${old_dirs[@]}"; do
+    present "$d" && return 0
+  done
+  return 1
+}
+SYS_MIGRATING=0
+if old_system_install || present "$MIGRATION_PENDING"; then SYS_MIGRATING=1; fi
+
+# In a dry run nothing has moved yet, so the files a step would find in a new
+# folder are still in the old one. seen() gives the path to read for a path
+# in a new folder; a real run reads the path itself.
+seen() {
+  local path="$1" i
+  if [ "$DRY" -eq 1 ]; then
+    for i in "${!new_dirs[@]}"; do
+      case "$path" in
+        "${new_dirs[$i]}" | "${new_dirs[$i]}"/*)
+          if ! present "${new_dirs[$i]}" && present "${old_dirs[$i]}"; then
+            printf '%s\n' "${old_dirs[$i]}${path#"${new_dirs[$i]}"}"
+            return
+          fi
+          ;;
+      esac
+    done
+    case "$path" in
+      "$REPORT_DIR" | "$REPORT_DIR"/*)
+        if ! present "$REPORT_DIR" && [ -d "$OLD_REPORT_DIR" ]; then
+          printf '%s\n' "${OLD_REPORT_DIR}${path#"$REPORT_DIR"}"
+          return
+        fi
+        ;;
+    esac
+  fi
+  printf '%s\n' "$path"
+}
 
 # ---------------------------------------------------------------------------
 # Uninstall
@@ -412,14 +561,14 @@ if [ "$UNINSTALL" -eq 1 ]; then
 
   say "stopping and disabling timers"
   for t in "${TIMERS[@]}"; do
-    if unit_ours "${UNIT_DIR}/security-scan-${t}.timer"; then
-      run systemctl disable --now "security-scan-${t}.timer"
+    if unit_ours "${UNIT_DIR}/spycatcher-${t}.timer"; then
+      run systemctl disable --now "spycatcher-${t}.timer"
     fi
   done
-  if unit_ours "${USER_UNIT_DIR}/security-report.timer"; then
-    run systemctl --global disable security-report.timer
+  if unit_ours "${USER_UNIT_DIR}/spycatcher-report.timer"; then
+    run systemctl --global disable spycatcher-report.timer
     if [ -S "$BUS" ]; then
-      as_user systemctl --user stop security-report.timer
+      as_user systemctl --user stop spycatcher-report.timer
     fi
   fi
 
@@ -448,34 +597,23 @@ if [ "$UNINSTALL" -eq 1 ]; then
   if picklescan_link_ours "${BIN_DIR}/picklescan"; then
     run rm -f "${BIN_DIR}/picklescan"
   fi
-  # Only the two folders this installer makes in /opt/security-scan are
-  # removed, and the folder itself only once it is empty.
+  # Only the picklescan environment this installer makes in /opt/spycatcher
+  # is removed, and the folder itself only once it is empty.
   if venv_ours "$PICKLE_VENV"; then
     run rm -rf "$PICKLE_VENV"
   elif present "$PICKLE_VENV"; then
     keep "$PICKLE_VENV" dir
   fi
-  if legacy_tools_ours "$LEGACY_TOOL_DIR"; then
-    remove_legacy_tools "$LEGACY_TOOL_DIR"
-  elif present "$LEGACY_TOOL_DIR"; then
-    keep "$LEGACY_TOOL_DIR" dir
-  fi
   if real_root_dir "$OPT"; then
-    if [ "$DRY" -eq 1 ]; then
-      echo "  rmdir ${OPT} (if it is now empty)"
-    elif rmdir "$OPT" 2>/dev/null; then
-      echo "  rmdir ${OPT}"
-    else
-      kept+=("${OPT} (holds files this installer did not make)")
-    fi
+    rmdir_if_empty "$OPT" || kept+=("${OPT} (holds files this installer did not make)")
   elif present "$OPT"; then
     keep "$OPT" dir
   fi
 
   # Units with similar names are not this plugin's, but a timer of that kind
-  # may have relied on security-scan@.service, so they are worth a mention.
+  # may have relied on spycatcher@.service, so they are worth a mention.
   others=()
-  for f in "$UNIT_DIR"/security-scan* "$USER_UNIT_DIR"/security-report*; do
+  for f in "$UNIT_DIR"/spycatcher* "$USER_UNIT_DIR"/spycatcher-report*; do
     present "$f" || continue
     case " ${SYSTEM_UNITS[*]} ${USER_UNITS[*]} " in
       *" ${f##*/} "*) continue ;;
@@ -483,16 +621,24 @@ if [ "$UNINSTALL" -eq 1 ]; then
     others+=("$f")
   done
 
+  # Anything still under the names this project had before 0.4.0.
+  leftovers=()
+  for f in "${OLD_SYSTEM_UNITS[@]/#/${UNIT_DIR}/}" "${OLD_USER_UNITS[@]/#/${USER_UNIT_DIR}/}" \
+    "${OLD_PROGRAMS[@]/#/${BIN_DIR}/}" "$OLD_OPT" "${old_dirs[@]}" "$OLD_REPORT_DIR" \
+    "${PLUGINS_DIR}/${OLD_PLUGIN_ID}"; do
+    if present "$f"; then leftovers+=("$f"); fi
+  done
+
   echo
   echo "Left in place, because they hold your settings, history and baselines:"
-  echo "  ${ETC}                 configuration and risk register"
-  echo "  ${RKH_LOCAL}           rkhunter overrides"
-  echo "  /var/log/security-scan             scan logs"
+  echo "  ${ETC}                    configuration and risk register"
+  echo "  ${RKH_LOCAL}       rkhunter overrides"
+  echo "  ${LOG_DIR}                scan logs"
   echo "  /var/lib/aide                      AIDE baseline"
-  echo "  /var/lib/security-scan             trusted copy of limine.conf, package file lists"
-  echo "  ${TARGET_HOME}/.local/share/security-report   weekly HTML reports"
+  echo "  ${LIB_DIR}                trusted copy of limine.conf, package file lists"
+  echo "  ${REPORT_DIR}   weekly HTML reports"
   echo "Delete them by hand if you no longer want them, for example:"
-  echo "  sudo rm -r ${ETC} /var/log/security-scan /var/lib/aide /var/lib/security-scan"
+  echo "  sudo rm -r ${ETC} ${LOG_DIR} /var/lib/aide ${LIB_DIR}"
   echo "The packages (arch-audit, lynis, gitleaks, rkhunter, aide) were not removed."
   if [ "${#kept[@]}" -gt 0 ]; then
     echo >&2
@@ -504,6 +650,13 @@ if [ "$UNINSTALL" -eq 1 ]; then
     echo "Not installed by this plugin, so left alone. Check whether they still work without it:" >&2
     printf '  %s\n' "${others[@]}" >&2
   fi
+  if [ "${#leftovers[@]}" -gt 0 ]; then
+    echo >&2
+    echo "Still under Security Scan, this project's name before 0.4.0, and left alone." >&2
+    echo "Run the installer without --uninstall to move them to the new names first, or" >&2
+    echo "remove them by hand:" >&2
+    printf '  %s\n' "${leftovers[@]}" >&2
+  fi
   exit 0
 fi
 
@@ -511,7 +664,7 @@ fi
 # Preflight
 # ---------------------------------------------------------------------------
 
-# Every path this installer writes over, or empties, is checked before
+# Every path this installer writes over, moves, or empties, is checked before
 # anything is changed, packages included. If one of them holds something that
 # is not this plugin's, the installer lists them all and stops, so a refusal
 # leaves the machine exactly as it was.
@@ -530,9 +683,41 @@ done
 if present "$PICKLE_VENV" && ! venv_ours "$PICKLE_VENV"; then
   conflict "$PICKLE_VENV" dir
 fi
+# Each old folder is renamed to its new name, so both must be real folders
+# that only root can write, and the new one must not already hold files.
+for i in "${!old_dirs[@]}"; do
+  old=${old_dirs[$i]} new=${new_dirs[$i]}
+  if present "$new" && ! real_root_dir "$new"; then
+    [ "$new" = "$ETC" ] || conflict "$new" dir
+    continue
+  fi
+  present "$old" || continue
+  if ! real_root_dir "$old"; then
+    conflict "$old" dir
+  elif present "$new"; then
+    rc=0
+    dir_empty "$new" || rc=$?
+    if [ "$rc" -eq 1 ]; then
+      conflicts+=("${old} and ${new} both exist and both hold files; move what you want to keep into ${new} by hand, remove ${old}, and run this again")
+    elif [ "$rc" -eq 2 ]; then
+      echo "  cannot see inside ${new} without root; a real run refuses if both it and ${old} hold files"
+    fi
+  fi
+done
+# A scan that is running under the old name would write into a folder that
+# is about to move.
+if present "${UNIT_DIR}/security-scan@.service"; then
+  for t in "${TIMERS[@]}"; do
+    if systemctl is-active --quiet "security-scan@${t}.service" 2>/dev/null; then
+      conflicts+=("security-scan@${t}.service is running; wait for it to finish (systemctl status security-scan@${t}.service) and run this again")
+    fi
+  done
+fi
 # aide.conf is regenerated on every run, with a backup of a copy that differs.
-if present "$ETC/aide.conf" && { [ -L "$ETC/aide.conf" ] || [ ! -f "$ETC/aide.conf" ]; }; then
-  conflict "$ETC/aide.conf" file
+etc_now=$ETC
+if ! present "$ETC" && present "$OLD_ETC"; then etc_now=$OLD_ETC; fi
+if present "$etc_now/aide.conf" && { [ -L "$etc_now/aide.conf" ] || [ ! -f "$etc_now/aide.conf" ]; }; then
+  conflict "$etc_now/aide.conf" file
 fi
 if [ "${#conflicts[@]}" -gt 0 ]; then
   {
@@ -563,14 +748,91 @@ if [ -z "$USER_GROUP" ]; then
     if ! getent group "$TARGET_USER" >/dev/null; then
       echo "For example: groupadd ${TARGET_USER} && usermod -g ${TARGET_USER} ${TARGET_USER}"
     fi
-    if present "$ETC/scan.conf" || present "$ETC/risk-register.toml"; then
-      echo "An earlier version left files in ${ETC} that other users may be able to read."
-      echo "Until then, run: chmod o-rwx ${ETC}/*"
+    if present "$etc_now/scan.conf" || present "$etc_now/risk-register.toml"; then
+      echo "An earlier version left files in ${etc_now} that other users may be able to read."
+      echo "Until then, run: chmod o-rwx ${etc_now}/*"
     fi
   } >&2
   exit 1
 fi
 echo "  nothing in the way"
+
+# ---------------------------------------------------------------------------
+# Moving an install under the earlier name: steps 1 to 3
+# ---------------------------------------------------------------------------
+
+if [ "$SYS_MIGRATING" -eq 1 ]; then
+  say "moving Security Scan, this project's earlier name, to Spycatcher"
+
+  # Step 1. One last check against the old baseline, only when asked for.
+  if [ "$FINAL_CHECK" -eq 1 ] && unit_ours "${UNIT_DIR}/security-scan@.service" &&
+    program_ours "${BIN_DIR}/security-scan" && command -v aide >/dev/null 2>&1; then
+    run systemctl start security-scan@aide.service
+  elif [ "$FINAL_CHECK" -eq 1 ]; then
+    echo "  no AIDE check under the old names to run"
+  elif unit_ours "${UNIT_DIR}/security-scan@.service"; then
+    echo "  no last AIDE check under the old names (pass --final-check to run one, which"
+    echo "  takes several minutes); changes since the last daily check go into the new"
+    echo "  baseline without being reported"
+  fi
+
+  # Step 2. The old timers are disabled before anything moves, so no scan
+  # starts under the old names while their folders are renamed.
+  for t in "${TIMERS[@]}"; do
+    if unit_ours "${UNIT_DIR}/security-scan-${t}.timer"; then
+      run systemctl disable --now "security-scan-${t}.timer"
+    fi
+  done
+  if unit_ours "${USER_UNIT_DIR}/security-report.timer"; then
+    run systemctl --global disable security-report.timer
+    if [ -S "$BUS" ]; then
+      as_user systemctl --user stop security-report.timer
+    fi
+  fi
+
+  # Step 3. Rename each folder that is still under its old name. The preflight
+  # has checked that a new folder that already exists is empty.
+  for i in "${!old_dirs[@]}"; do
+    old=${old_dirs[$i]} new=${new_dirs[$i]}
+    present "$old" || continue
+    if present "$new"; then run rmdir "$new"; fi
+    run mv -T "$old" "$new"
+  done
+  if [ ! -d "$(seen "$LIB_DIR")" ]; then
+    run install -d -m 0700 "$LIB_DIR"
+    run chown root:root "$LIB_DIR"
+  fi
+  if ! present "$MIGRATION_PENDING"; then
+    put "$MIGRATION_PENDING" 0600 <<<'spycatcher-install is moving an install of Security Scan; removed when done.'
+  fi
+fi
+
+# The report folder belongs to the desktop user, so it is renamed as them.
+# Pages keep their names; latest.html, an absolute link, is pointed at the
+# moved page.
+if [ -d "$OLD_REPORT_DIR" ] && [ ! -L "$OLD_REPORT_DIR" ]; then
+  say "moving the weekly reports to ${REPORT_DIR}"
+  if ! present "$REPORT_DIR"; then
+    as_user mv -T "$OLD_REPORT_DIR" "$REPORT_DIR"
+  elif [ -d "$REPORT_DIR" ] && [ ! -L "$REPORT_DIR" ] && dir_empty "$REPORT_DIR"; then
+    as_user rmdir "$REPORT_DIR"
+    as_user mv -T "$OLD_REPORT_DIR" "$REPORT_DIR"
+  else
+    echo "  ${REPORT_DIR} already holds files; ${OLD_REPORT_DIR} left as it is"
+    NOTES+=("${OLD_REPORT_DIR} was not moved, because ${REPORT_DIR} already holds files. Move the pages you want to keep by hand, as ${TARGET_USER}.")
+  fi
+elif [ -L "$OLD_REPORT_DIR" ]; then
+  NOTES+=("${OLD_REPORT_DIR} is a symlink, so it was not moved. Point ${REPORT_DIR} at the same place by hand if you want the old pages there.")
+fi
+latest=$(seen "$REPORT_DIR/latest.html")
+if [ -L "$latest" ]; then
+  target=$(readlink -- "$latest")
+  case "$target" in
+    "$OLD_REPORT_DIR"/*)
+      as_user ln -sfn -- "${REPORT_DIR}/${target#"$OLD_REPORT_DIR"/}" "$REPORT_DIR/latest.html"
+      ;;
+  esac
+fi
 
 # ---------------------------------------------------------------------------
 # Packages
@@ -580,7 +842,7 @@ say "installing packages"
 run pacman -S --needed --noconfirm arch-audit lynis gitleaks rkhunter python
 
 # aide is only in the AUR, and AUR helpers must not build as root. The scans
-# still install; security-scan aide logs "aide not installed" until it is.
+# still install; spycatcher-scan aide logs "aide not installed" until it is.
 HAVE_AIDE=0
 if command -v aide >/dev/null 2>&1; then
   HAVE_AIDE=1
@@ -602,17 +864,15 @@ fi
 # anything not listed. The environment is only recreated when it is missing or
 # was made for another Python, so that re-running the installer does not
 # rewrite every file under AIDE's watch.
+#
+# Step 4 of a move from the old names: the environment in /opt/security-scan
+# is not moved, since a virtual environment records its own path. A new one
+# is built here, and the old one is removed once the link points at the new.
 say "installing picklescan"
 if command -v uv >/dev/null 2>&1; then
   if [ ! -d "$OPT" ]; then
     run install -d -m 0755 "$OPT"
     run chown root:root "$OPT"
-  fi
-  # Versions up to 0.2.1 installed picklescan with uv tool into this folder.
-  if legacy_tools_ours "$LEGACY_TOOL_DIR"; then
-    remove_legacy_tools "$LEGACY_TOOL_DIR"
-  elif present "$LEGACY_TOOL_DIR"; then
-    echo "  ${LEGACY_TOOL_DIR} was not made by this installer; left alone"
   fi
   pyver=$(/usr/bin/python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])')
   if [ ! -x "$PICKLE_VENV/bin/python" ] || [ ! -d "$PICKLE_VENV/lib/python${pyver}" ]; then
@@ -620,17 +880,39 @@ if command -v uv >/dev/null 2>&1; then
       uv venv --clear --no-config --python /usr/bin/python3 "$PICKLE_VENV"
   fi
   if ! present "$PICKLE_VENV/$VENV_MARKER"; then
-    put "$PICKLE_VENV/$VENV_MARKER" 0644 <<<'Made by security-scan-install. Removed on uninstall.'
+    put "$PICKLE_VENV/$VENV_MARKER" 0644 <<<'Made by spycatcher-install. Removed on uninstall.'
   fi
   run env UV_PYTHON_PREFERENCE=only-system \
     uv pip sync --no-config --python "$PICKLE_VENV/bin/python" \
     --require-hashes --only-binary :all: "$PICKLE_REQS"
   # Replace the link only if it is absent or one this installer made.
   if ! present "${BIN_DIR}/picklescan" || picklescan_link_ours "${BIN_DIR}/picklescan"; then
-    run ln -sfn "$PICKLE_VENV/bin/picklescan" "${BIN_DIR}/picklescan"
+    if [ "$(readlink -- "${BIN_DIR}/picklescan" 2>/dev/null)" != "$PICKLE_VENV/bin/picklescan" ]; then
+      run ln -sfn "$PICKLE_VENV/bin/picklescan" "${BIN_DIR}/picklescan"
+    fi
   else
     echo "  ${BIN_DIR}/picklescan exists and was not made by this installer; left alone"
     NOTES+=("${BIN_DIR}/picklescan was not made by this installer. Remove it and re-run, so the models scan uses the pinned copy in ${PICKLE_VENV}.")
+  fi
+  # What versions before 0.4.0 left in /opt/security-scan.
+  if legacy_tools_ours "$LEGACY_TOOL_DIR"; then
+    remove_legacy_tools "$LEGACY_TOOL_DIR"
+  elif present "$LEGACY_TOOL_DIR"; then
+    echo "  ${LEGACY_TOOL_DIR} was not made by this installer; left alone"
+  fi
+  if venv_ours "$OLD_PICKLE_VENV"; then
+    run rm -rf "$OLD_PICKLE_VENV"
+  elif present "$OLD_PICKLE_VENV"; then
+    echo "  ${OLD_PICKLE_VENV} was not made by this installer; left alone"
+    NOTES+=("${OLD_PICKLE_VENV} was not made by this installer, so it was left in place.")
+  fi
+  if real_root_dir "$OLD_OPT"; then
+    if ! rmdir_if_empty "$OLD_OPT"; then
+      echo "  ${OLD_OPT} holds files this installer did not make; left in place"
+      NOTES+=("${OLD_OPT} holds files this installer did not make, so it was left in place.")
+    fi
+  elif present "$OLD_OPT"; then
+    NOTES+=("${OLD_OPT} is $(why_not_ours "$OLD_OPT" dir), so it was left in place.")
   fi
 else
   echo "  uv is not installed, so picklescan was skipped. Install it with: sudo pacman -S uv"
@@ -650,13 +932,23 @@ say "installing programs"
 for prog in "${PROGRAMS[@]}"; do
   put "${BIN_DIR}/${prog}" 0755 <"$SRC/bin/${prog}"
 done
+# Step 5 of a move: the programs under their old names go once the new ones
+# are in place.
+for p in "${OLD_PROGRAMS[@]/#/${BIN_DIR}/}"; do
+  if program_ours "$p"; then
+    run rm -f "$p"
+  elif present "$p"; then
+    echo "  ${p} is $(why_not_ours "$p" program); left alone"
+    NOTES+=("${p} has the name of a program from before 0.4.0, but is $(why_not_ours "$p" program), so it was left in place.")
+  fi
+done
 
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
 
 say "installing configuration in ${ETC}"
-if [ ! -d "$ETC" ]; then
+if [ ! -d "$(seen "$ETC")" ]; then
   run install -d -m 0755 "$ETC"
   run chown root:root "$ETC"
 fi
@@ -689,14 +981,15 @@ REPORT_GROUP=$USER_GROUP
 # the file between the check and the change. Anything else is left as it is
 # and listed at the end.
 tighten() {
-  local path="$1" mask="$2" group="${3:-root}" cur new
-  present "$path" || return 0
-  if [ -L "$path" ] || [ ! -f "$path" ] || ! root_owned "$path"; then
-    echo "  left ${path} as it is ($(why_not_ours "$path" file))"
-    NOTES+=("${path} was left as it is, because it is $(why_not_ours "$path" file). It may hold private names and paths; check that other users cannot read it.")
+  local path="$1" mask="$2" group="${3:-root}" cur new here
+  here=$(seen "$path")
+  present "$here" || return 0
+  if [ -L "$here" ] || [ ! -f "$here" ] || ! root_owned "$here"; then
+    echo "  left ${path} as it is ($(why_not_ours "$here" file))"
+    NOTES+=("${path} was left as it is, because it is $(why_not_ours "$here" file). It may hold private names and paths; check that other users cannot read it.")
     return 0
   fi
-  cur=$(stat -c %a -- "$path")
+  cur=$(stat -c %a -- "$here")
   new=$(printf '0%o' $((8#$cur & 8#$mask)))
   if [ $((8#$cur)) -ne $((8#$new)) ]; then
     echo "  make ${path} private (mode 0${cur#0} to ${new})"
@@ -707,16 +1000,16 @@ tighten() {
   # stay readable by all of its members, so it moves to GROUP. A file only
   # root reads has no group bits left after its mask.
   if [ "$group" != root ] && [ $((8#$new & 8#070)) -ne 0 ] &&
-    [ "$(stat -c %g -- "$path")" != 0 ] && [ "$(stat -c %G -- "$path")" != "$group" ]; then
-    echo "  take ${path} from group $(stat -c %G -- "$path")"
+    [ "$(stat -c %g -- "$here")" != 0 ] && [ "$(stat -c %G -- "$here")" != "$group" ]; then
+    echo "  take ${path} from group $(stat -c %G -- "$here")"
     run chown "root:${group}" "$path"
   elif [ "$group" != root ] && [ $((8#$new & 8#040)) -ne 0 ] &&
-    [ "$(stat -c %g -- "$path")" = 0 ]; then
+    [ "$(stat -c %g -- "$here")" = 0 ]; then
     run chown "root:${group}" "$path"
   fi
 }
 
-if present "$ETC/scan.conf"; then
+if present "$(seen "$ETC/scan.conf")"; then
   echo "  keep ${ETC}/scan.conf (exists)"
   tighten "$ETC/scan.conf" "$REPORT_MODE" "$REPORT_GROUP"
 else
@@ -731,28 +1024,34 @@ fi
 # that is not yet taken, so no earlier backup is overwritten. The backup keeps
 # the mode of the file it copies, at most 0600, and the new file is never more
 # open than the one it replaces, so a file that was made private stays private.
+# Step 6 of a move: the template leaves out the new paths, so an aide.conf
+# written under the old name is replaced here, with a backup.
 aide_conf=$(<"$SRC/system/aide.conf.in")
 aide_conf=${aide_conf//@HOME@/"$HOME_RE"}
 aide_mode=0600
-if [ -f "$ETC/aide.conf" ] && [ ! -L "$ETC/aide.conf" ]; then
-  old_mode=$(stat -c %a -- "$ETC/aide.conf")
+aide_here=$(seen "$ETC/aide.conf")
+if [ -f "$aide_here" ] && [ ! -L "$aide_here" ]; then
+  old_mode=$(stat -c %a -- "$aide_here")
   aide_mode=$(printf '0%o' $((8#$old_mode & 8#600)))
-  if ! printf '%s\n' "$aide_conf" | cmp -s - "$ETC/aide.conf"; then
+  if [ ! -r "$aide_here" ]; then
+    echo "  cannot read ${ETC}/aide.conf without root; a real run backs it up if it differs"
+  elif ! printf '%s\n' "$aide_conf" | cmp -s - "$aide_here"; then
     bak="$ETC/aide.conf.bak-${DATE}"
     n=1
-    while present "$bak"; do
+    while present "$(seen "$bak")"; do
       bak="$ETC/aide.conf.bak-${DATE}.${n}"
       n=$((n + 1))
     done
-    put "$bak" "$aide_mode" <"$ETC/aide.conf"
+    put "$bak" "$aide_mode" <"$aide_here"
   fi
 fi
 # A here-string, not a pipe: put must run in this shell, where the trap that
 # removes an interrupted temporary file can see it.
 put "$ETC/aide.conf" "$aide_mode" <<<"$aide_conf"
 # Backups made by earlier versions kept the mode of the file they copied.
-for f in "$ETC"/aide.conf.bak-*; do
-  tighten "$f" 0600
+for f in "$(seen "$ETC")"/aide.conf.bak-*; do
+  present "$f" || continue
+  tighten "$ETC/${f##*/}" 0600
 done
 
 # These hold the user's own rules and assessments. Never overwrite them. A
@@ -760,7 +1059,7 @@ done
 # created through one.
 install_once() {
   local src="$1" dest="$2" mode="$3" group="${4:-root}"
-  if present "$dest"; then
+  if present "$(seen "$dest")"; then
     echo "  keep ${dest} (exists)"
   else
     put "$dest" "$mode" "$group" <"$src"
@@ -784,9 +1083,20 @@ say "installing system units"
 for u in "${SYSTEM_UNITS[@]}"; do
   put "${UNIT_DIR}/${u}" 0644 <"$(unit_source "$u")"
 done
+# Step 5 of a move: the units under their old names were disabled before the
+# folders moved, and go now that the new ones are in place.
+for u in "${OLD_SYSTEM_UNITS[@]/#/${UNIT_DIR}/}" "${OLD_USER_UNITS[@]/#/${USER_UNIT_DIR}/}"; do
+  if unit_ours "$u"; then
+    run rm -f "$u"
+  elif present "$u"; then
+    echo "  ${u} is $(why_not_ours "$u" unit); left alone"
+    NOTES+=("${u} has the name of a unit from before 0.4.0, but $(why_not_ours "$u" unit), so it was left in place. It runs programs that are no longer installed; disable and remove it by hand.")
+  fi
+done
 run systemctl daemon-reload
+# Step 7 of a move, and every install: enable the timers.
 for t in "${TIMERS[@]}"; do
-  run systemctl enable --now "security-scan-${t}.timer"
+  run systemctl enable --now "spycatcher-${t}.timer"
 done
 
 # The weekly report runs as the desktop user, so its units are user units.
@@ -796,10 +1106,10 @@ say "installing user units"
 for u in "${USER_UNITS[@]}"; do
   put "${USER_UNIT_DIR}/${u}" 0644 <"$(unit_source "$u")"
 done
-run systemctl --global enable security-report.timer
+run systemctl --global enable spycatcher-report.timer
 if [ -S "$BUS" ]; then
   as_user systemctl --user daemon-reload
-  as_user systemctl --user start security-report.timer
+  as_user systemctl --user start spycatcher-report.timer
 else
   echo "  no session bus for ${TARGET_USER}; the timer starts at the next login"
 fi
@@ -808,14 +1118,15 @@ fi
 # so an old hand-installed copy would hide every future update. The user's
 # files are theirs to delete, so this only reports them.
 dups=()
-for f in security-report.service security-report.timer timers.target.wants/security-report.timer; do
+for f in spycatcher-report.service spycatcher-report.timer timers.target.wants/spycatcher-report.timer \
+  security-report.service security-report.timer timers.target.wants/security-report.timer; do
   p="${TARGET_HOME}/.config/systemd/user/${f}"
   if [ -e "$p" ] || [ -L "$p" ]; then dups+=("$p"); fi
 done
 if [ "${#dups[@]}" -gt 0 ]; then
-  echo "  found older per-user copies that override the installed units:"
+  echo "  found older per-user copies of the report units:"
   printf '    %s\n' "${dups[@]}"
-  NOTES+=("Remove the older per-user report units, as ${TARGET_USER}: rm ${dups[*]}; systemctl --user daemon-reload; systemctl --user restart security-report.timer")
+  NOTES+=("Remove the older per-user report units, as ${TARGET_USER}: rm ${dups[*]}; systemctl --user daemon-reload; systemctl --user restart spycatcher-report.timer")
 fi
 
 # ---------------------------------------------------------------------------
@@ -827,14 +1138,31 @@ say "baselines"
 # root cannot tell whether they exist.
 can_see() { [ -x "$(dirname "$1")" ]; }
 
-# security-scan aide creates the baseline itself on its first run.
+# Step 8 of a move. The renamed folders, programs, units and picklescan
+# environment would otherwise be the next check's findings. aide --init reads
+# every watched file, which takes several minutes, and the result replaces
+# the baseline as the scan's own re-baseline does, keeping the old one as
+# aide.db.prev.gz.
+if [ "$HAVE_AIDE" -eq 1 ] && { present "$MIGRATION_PENDING" || { [ "$DRY" -eq 1 ] && [ "$SYS_MIGRATING" -eq 1 ]; }; }; then
+  if ! can_see "$AIDE_DB"; then
+    echo "  cannot see the AIDE baseline without root; a real run re-baselines it after the move"
+  elif [ -s "$AIDE_DB" ]; then
+    echo "  re-baselining AIDE after the move; this takes several minutes"
+    run rm -f "${AIDE_DB%/*}/aide.db.new.gz"
+    run aide --init --no-progress --no-color -c "$ETC/aide.conf"
+    run cp -f "$AIDE_DB" "${AIDE_DB%/*}/aide.db.prev.gz"
+    run mv -f "${AIDE_DB%/*}/aide.db.new.gz" "$AIDE_DB"
+  fi
+fi
+
+# spycatcher-scan aide creates the baseline itself on its first run.
 if [ "$HAVE_AIDE" -eq 1 ]; then
   if ! can_see "$AIDE_DB"; then
     echo "  cannot see the AIDE baseline without root; a real run starts the first scan if it is missing"
   elif [ -s "$AIDE_DB" ]; then
     echo "  keep AIDE baseline (exists)"
   else
-    run systemctl start --no-block security-scan@aide.service
+    run systemctl start --no-block spycatcher@aide.service
   fi
 fi
 # rkhunter needs a record of file properties before its first check, or every
@@ -848,16 +1176,125 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Moving an install under the earlier name: step 9, the desktop user's side
+# ---------------------------------------------------------------------------
+
+# The plugin id is the name of its link in the plugins folder, and the shell
+# keeps it in shell.json with the widget's settings. Both change to the new
+# id, as the desktop user, so the bar keeps the widget and its settings.
+OLD_LINK="${PLUGINS_DIR}/${OLD_PLUGIN_ID}"
+NEW_LINK="${PLUGINS_DIR}/${PLUGIN_ID}"
+if [ -L "$OLD_LINK" ]; then
+  say "renaming the plugin link to ${PLUGIN_ID}"
+  link_target=$(readlink -- "$OLD_LINK")
+  if ! present "$NEW_LINK"; then
+    as_user ln -s -- "$link_target" "$NEW_LINK"
+    as_user rm -f -- "$OLD_LINK"
+  elif [ -L "$NEW_LINK" ] && [ "$(readlink -- "$NEW_LINK")" = "$link_target" ]; then
+    as_user rm -f -- "$OLD_LINK"
+  else
+    echo "  ${NEW_LINK} already exists and points elsewhere; ${OLD_LINK} left as it is"
+    NOTES+=("Both ${OLD_LINK} and ${NEW_LINK} exist. Keep the one that points at your checkout, under the new name, and remove the other.")
+  fi
+elif present "$OLD_LINK"; then
+  NOTES+=("${OLD_LINK} is not a link, so it was not renamed. Rename it to ${NEW_LINK} by hand.")
+fi
+
+# shell.json is read as JSON and written back whole, through a temporary file
+# in the same folder that is then renamed over it, so an interrupted run
+# leaves the old file. Every entry and setting is kept; only strings and keys
+# that are exactly the old id change. A file that is missing or is not valid
+# JSON is left alone with a message.
+SHELL_JSON_PY='
+import json, os, sys, tempfile
+path, old, new = sys.argv[1:4]
+path = os.path.realpath(path)
+try:
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+except FileNotFoundError:
+    print(f"  no {path}; nothing to rewrite")
+    sys.exit(0)
+except (OSError, ValueError) as err:
+    print(f"  {path} could not be read as JSON ({err}); left as it is")
+    sys.exit(3)
+count = 0
+def walk(x):
+    global count
+    if isinstance(x, dict):
+        out = {}
+        for k, v in x.items():
+            if k == old and new not in x:
+                k = new
+                count += 1
+            out[k] = walk(v)
+        return out
+    if isinstance(x, list):
+        return [walk(v) for v in x]
+    if x == old:
+        count += 1
+        return new
+    return x
+data = walk(data)
+if not count:
+    print(f"  keep {path} (no entry for {old})")
+    sys.exit(0)
+mode = os.stat(path).st_mode & 0o7777
+fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".shell.json.")
+try:
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, mode)
+    os.replace(tmp, path)
+except BaseException:
+    os.unlink(tmp)
+    raise
+print(f"  rewrote {count} mention(s) of {old} in {path} as {new}")
+'
+if [ -f "$SHELL_JSON" ] && grep -qF "\"${OLD_PLUGIN_ID}\"" "$SHELL_JSON" 2>/dev/null; then
+  say "changing the plugin id in ${SHELL_JSON}"
+  if [ "$DRY" -eq 1 ]; then
+    echo "  rewrite ${OLD_PLUGIN_ID} as ${PLUGIN_ID} in ${SHELL_JSON}, as ${TARGET_USER}"
+  else
+    rc=0
+    runuser -u "$TARGET_USER" -- python3 -I -c "$SHELL_JSON_PY" "$SHELL_JSON" "$OLD_PLUGIN_ID" "$PLUGIN_ID" || rc=$?
+    if [ "$rc" -eq 0 ]; then
+      NOTES+=("Restart the Omarchy shell (omarchy-restart-shell), so the bar loads the widget as ${PLUGIN_ID}.")
+    else
+      NOTES+=("${SHELL_JSON} could not be rewritten; change ${OLD_PLUGIN_ID} to ${PLUGIN_ID} in it by hand, then run omarchy-restart-shell.")
+    fi
+  fi
+fi
+
+# The move is complete once every step above has run.
+if present "$MIGRATION_PENDING" || { [ "$DRY" -eq 1 ] && [ "$SYS_MIGRATING" -eq 1 ]; }; then
+  put "$MIGRATED_MARKER" 0600 <<<"Moved from Security Scan to Spycatcher by spycatcher-install on ${DATE}."
+  run rm -f "$MIGRATION_PENDING"
+fi
+# Drop-ins and other units under the old names may have relied on the old
+# units, so they are worth a mention.
+for f in "$UNIT_DIR"/security-scan* "$USER_UNIT_DIR"/security-report*; do
+  present "$f" || continue
+  case " ${OLD_SYSTEM_UNITS[*]} ${OLD_USER_UNITS[*]} " in
+    *" ${f##*/} "*) continue ;;
+  esac
+  NOTES+=("${f} is under the name this project had before 0.4.0. If it is a drop-in or a timer of your own, move it to the new name (spycatcher) by hand.")
+done
+
+# ---------------------------------------------------------------------------
 
 echo
-systemctl list-timers 'security-scan-*' --no-pager || true
+systemctl list-timers 'spycatcher-*' --no-pager || true
 if [ -S "$BUS" ]; then
   if [ "$(id -u)" -eq "$TARGET_UID" ]; then
-    systemctl --user list-timers security-report.timer --no-pager 2>/dev/null || true
+    systemctl --user list-timers spycatcher-report.timer --no-pager 2>/dev/null || true
   else
     runuser -u "$TARGET_USER" -- env "XDG_RUNTIME_DIR=${RUN_USER}/${TARGET_UID}" \
       "DBUS_SESSION_BUS_ADDRESS=unix:path=${BUS}" \
-      systemctl --user list-timers security-report.timer --no-pager 2>/dev/null || true
+      systemctl --user list-timers spycatcher-report.timer --no-pager 2>/dev/null || true
   fi
 fi
 
@@ -867,4 +1304,4 @@ if [ "${#NOTES[@]}" -gt 0 ]; then
   printf '  - %s\n' "${NOTES[@]}"
 fi
 echo
-echo "done. logs in /var/log/security-scan (readable by ${TARGET_USER})"
+echo "done. logs in ${LOG_DIR} (readable by ${TARGET_USER})"

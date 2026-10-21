@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
-"""Weekly security report: grades the security-scan logs red, amber, green.
+"""Spycatcher report: grades the spycatcher-scan logs red, amber, green.
 
-    security-report               colour report in the terminal
-    security-report --plain       same, without colour
-    security-report --all         also list the green items
-    security-report --html FILE   self-contained HTML page
-    security-report --days N      look back N days instead of 7
-    security-report --json        machine-readable, for the bar widget
-    security-report --status      the overall rating and summary line only
+    spycatcher-report               colour report in the terminal
+    spycatcher-report --plain       same, without colour
+    spycatcher-report --all         also list the green items
+    spycatcher-report --html FILE   self-contained HTML page
+    spycatcher-report --days N      look back N days instead of 7
+    spycatcher-report --json        machine-readable, for the bar widget
+    spycatcher-report --status      the overall rating and summary line only
 
-Reads /var/log/security-scan (written by `security-scan`) and the risk
-register at /etc/security-scan/risk-register.toml, which records what each
+Reads /var/log/spycatcher (written by `spycatcher-scan`) and the risk
+register at /etc/spycatcher/risk-register.toml, which records what each
 known finding means here and what is being done about it. A finding with no
 register entry is reported as unassessed rather than silently passed.
 
@@ -40,11 +40,11 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-LOG_DIR = Path(os.environ.get("LOG_DIR", "/var/log/security-scan"))
-REGISTER = Path(os.environ.get("RISK_REGISTER", "/etc/security-scan/risk-register.toml"))
-SCAN_CONF = Path(os.environ.get("SCAN_CONF", "/etc/security-scan/scan.conf"))
+LOG_DIR = Path(os.environ.get("LOG_DIR", "/var/log/spycatcher"))
+REGISTER = Path(os.environ.get("RISK_REGISTER", "/etc/spycatcher/risk-register.toml"))
+SCAN_CONF = Path(os.environ.get("SCAN_CONF", "/etc/spycatcher/scan.conf"))
 PACMAN_LOG = Path(os.environ.get("PACMAN_LOG", "/var/log/pacman.log"))
-ACKS = Path(os.environ.get("SECURITY_ACKS", "/etc/security-scan/acknowledged.json"))
+ACKS = Path(os.environ.get("SPYCATCHER_ACKS", "/etc/spycatcher/acknowledged.json"))
 
 GREEN, AMBER, RED = "green", "amber", "red"
 # Grey is neutral: off, not installed, or not applicable. It never makes a
@@ -177,7 +177,7 @@ def ago(when, now):
 # stopped. A run started by hand has no unit to ask, so a log written to in
 # the last few minutes also counts as still going.
 QUIET_MINUTES = 10
-# TimeoutStartSec of security-scan@.service.
+# TimeoutStartSec of spycatcher@.service.
 TIME_LIMIT_MINUTES = 45
 # An AIDE check set aside because pacman was running ("summary: skipped") is
 # not a result. One is normal; checks set aside for this long are a finding.
@@ -187,7 +187,7 @@ SKIPPED_AMBER_DAYS, SKIPPED_RED_DAYS = 1, 3
 def _unit(mode, prop):
     """A property of the scan's systemd unit, or "" when it cannot be read."""
     return run(["systemctl", "show", "--value", "-p", prop,
-                f"security-scan@{mode}.service"]).strip()
+                f"spycatcher@{mode}.service"]).strip()
 
 
 def _still_running(mode, p, now):
@@ -236,7 +236,7 @@ def scan_health(now, since):
     for mode, (cadence, amber_days, red_days) in SCANS.items():
         runs, _ = logs(mode, dt.datetime.min)
         if not runs:
-            s.add(RED, f"{mode} has never run", "", f"Check: systemctl status security-scan-{mode}.timer")
+            s.add(RED, f"{mode} has never run", "", f"Check: systemctl status spycatcher-scan-{mode}.timer")
             late += 1
             continue
         when, p = runs[-1]
@@ -270,7 +270,7 @@ def scan_health(now, since):
                          or lasted >= dt.timedelta(minutes=TIME_LIMIT_MINUTES - 1))
             what = ("ran past its time limit" if timed_out
                     else "stopped before it wrote a result")
-            journal = f"journalctl -u security-scan@{mode}.service"
+            journal = f"journalctl -u spycatcher@{mode}.service"
             action = (f"Check: {journal}. The next run meets the same work, so it needs a "
                       "fix, not a wait." if timed_out or again else
                       "Usually the machine shut down mid-run, and the next run catches up. "
@@ -283,7 +283,7 @@ def scan_health(now, since):
                   "Read the log; the scan is not protecting anything until this is fixed.")
         elif age >= red_days:
             s.add(RED, f"{mode}: {cadence.lower()} scan last ran {ago(when, now)}", "",
-                  f"Check: systemctl status security-scan-{mode}.timer")
+                  f"Check: systemctl status spycatcher-scan-{mode}.timer")
             late += 1
         elif age >= amber_days:
             s.add(AMBER, f"{mode}: {cadence.lower()} scan last ran {ago(when, now)}", "",
@@ -356,7 +356,7 @@ def packages(now, since, reg, installed):
 
 
 # Package files that a local pacman hook deliberately rewrites, so they always
-# fail pacman's checksum. Kept in step with hook_rewrote() in security-scan,
+# fail pacman's checksum. Kept in step with hook_rewrote() in spycatcher-scan,
 # which classifies them at scan time; this copy re-checks a RED line logged
 # before the scanner knew about the hook, against the file as it is now. The
 # log is left as written. Each entry: the hook's files, which must still be
@@ -607,7 +607,7 @@ def scriptlet_link_explains(line):
     """True when a RED unpackaged-file line is a symlink a package's own
     install script makes: it still resolves to a file the package owns, pacman
     finds that file unaltered, and the install script's own `ln -s` command
-    for the link's exact path points it at that same file. security-scan
+    for the link's exact path points it at that same file. spycatcher-scan
     calls scriptlet_link_target() through --scriptlet-link-target, so both
     use this one parser."""
     m = re.match(r"(?:added|changed) (.+) \(unpackaged file in a system code path\)$", line)
@@ -820,7 +820,7 @@ def scriptlet_setgid(path):
     mismatch, so its content, size and owner are as packaged. The install
     script must give it a group and the setgid bit (scriptlet_setgid_group),
     the file must now be in that group, and its mode must be the packaged
-    mode plus setgid and nothing else. security-scan calls this through
+    mode plus setgid and nothing else. spycatcher-scan calls this through
     --scriptlet-setgid, so both use this one check."""
     if os.path.islink(path) or not os.path.isfile(path):
         return None
@@ -861,7 +861,7 @@ def scriptlet_setgid(path):
 
 def _root_only(st):
     """True when a file is owned by root and nobody else may write it, the
-    same test security-scan applies before it sources scan.conf."""
+    same test spycatcher-scan applies before it sources scan.conf."""
     return st.st_uid == 0 and not st.st_mode & 0o022
 
 
@@ -942,7 +942,7 @@ def listed_link_package(path, links):
     these must hold: the path is listed, and is a symlink rather than a file;
     it resolves to a regular file owned by the listed package and no other;
     pacman finds that file unaltered; and the package's install script has an
-    `ln -s` command whose last argument is exactly the path. security-scan
+    `ln -s` command whose last argument is exactly the path. spycatcher-scan
     calls this through --listed-link, so both use this one check."""
     pkg = links.get(path)
     if not pkg or not os.path.islink(path):
@@ -1513,7 +1513,7 @@ def pacman_run_at(ctime, log=None):
     return None
 
 
-# The folders whose unpackaged files security-scan grades by place rather
+# The folders whose unpackaged files spycatcher-scan grades by place rather
 # than as system code: /boot by the package update count, the others amber.
 _NOT_SYSTEM_CODE = ("/boot/", "/usr/local/", "/opt/", "/etc/", "/root/", "/home/")
 
@@ -1540,7 +1540,7 @@ def written_in_pacman_run(path, log=None):
 
 
 def _in_run_reason(start):
-    """The reason security-scan logs for a file written_in_pacman_run()
+    """The reason spycatcher-scan logs for a file written_in_pacman_run()
     accepts."""
     return (f"appeared during the package update of {start:%a %d %b %H:%M}, "
             "which no rule explains; confirm")
@@ -1870,7 +1870,7 @@ def rebuilt_by_hook(path, log=None):
 
 
 def explain_changes(records, conf, log):
-    """For security-scan: the explanations above, for many files in one run.
+    """For spycatcher-scan: the explanations above, for many files in one run.
     `records` are (owner, path) pairs; owner is "" for a file no package
     owns, else the package whose checksum the file fails. Yields (path,
     grade, reason) for each file one of them explains, grade PKG or AMBER,
@@ -2199,7 +2199,7 @@ def limine_snapshot_change(path, reference_path, since):
     Snapshots sub-menu up to date: the file is one it manages, its program
     logged writing it since `since` (the last check), a trusted copy of
     limine.conf from the last accepted check exists, and the file passes the
-    content check against that copy. security-scan calls this through
+    content check against that copy. spycatcher-scan calls this through
     --limine-snapshot-change and keeps that copy. Nothing checks this for a
     RED line after the fact: /boot and the copy are readable by root only,
     and both have moved on by the time the report runs."""
@@ -2258,7 +2258,7 @@ def pacman_changed(start, end, log=None):
 
 def boot_explained_by_pacman(when, path, runs, log=None):
     """True when the AIDE run logged at `when` (whose log is `path`) had a
-    package transaction since the run before it. security-scan grades a boot
+    package transaction since the run before it. spycatcher-scan grades a boot
     change after one as a package change, but before 0.2.6 it missed
     reinstalls and downgrades, so this re-applies the rule to lines it logged
     red. It vouches only for the run the line came from; a later run says
@@ -2285,11 +2285,13 @@ def boot_explained_by_pacman(when, path, runs, log=None):
     return pacman_changed(start, end, log)
 
 
-# security-scan logs "graded by security-scan rules N" in each AIDE log since
-# 0.2.12, for the version of the rules it graded with: 2 in 0.2.12, 3 since
-# 0.2.13 added dkms_built(), 4 since 0.3.0 added written_in_pacman_run().
+# spycatcher-scan logs "graded by spycatcher rules N" in each AIDE log, for
+# the version of the rules it graded with: 2 in 0.2.12, 3 since 0.2.13 added
+# dkms_built(), 4 since 0.3.0 added written_in_pacman_run(). Versions before
+# 0.4.0 wrote "graded by security-scan rules N", under the project's earlier
+# name, and those logs are still read.
 RULES_VERSION = 4
-RULES_LINE = re.compile(r"^graded by security-scan rules (\d+)$", re.M)
+RULES_LINE = re.compile(r"^graded by (?:spycatcher|security-scan) rules (\d+)$", re.M)
 
 
 def recheck(line, links, log, when, until, current):
@@ -2311,7 +2313,7 @@ def recheck(line, links, log, when, until, current):
 # runs is one finding, dated by the first run that logged it, and findings
 # are grouped by the folder they are in and the day they were first seen, so
 # one kernel update reads as one item. Each group has an ID that
-# `sudo security-report --ack ID` records as checked. A red stays until it is
+# `sudo spycatcher-report --ack ID` records as checked. A red stays until it is
 # acknowledged or a rule explains it; it does not age out of the window.
 
 _LOGGED = re.compile(r"(\w+) (/.+) \(([^()]*)\)$")
@@ -2441,7 +2443,7 @@ SENSITIVE = ("/etc/sudoers", "/etc/pam.d", "/etc/security", "/etc/systemd", "/us
              "/etc/ssh", "/etc/udev", "/etc/cron", "/etc/xdg/autostart", "/etc/passwd",
              "/etc/shadow", "/etc/group", "/etc/gshadow", "/etc/hosts", "/etc/nsswitch.conf",
              "/etc/shells", "/etc/mkinitcpio", "/etc/default", "/etc/kernel", "/root",
-             "/usr/local/bin", "/usr/local/sbin", "/usr/local/lib", "/boot", "/etc/security-scan")
+             "/usr/local/bin", "/usr/local/sbin", "/usr/local/lib", "/boot", "/etc/spycatcher")
 
 
 def sensitive(path):
@@ -2456,7 +2458,7 @@ OPEN_RED_LOGS = set()
 
 
 def ack_hint(gid):
-    return f'Once checked, clear it with: sudo security-report --ack {gid} --reason "what it was"'
+    return f'Once checked, clear it with: sudo spycatcher-report --ack {gid} --reason "what it was"'
 
 
 def integrity(now, since):
@@ -2859,7 +2861,7 @@ def privacy(now, reg, location=None):
         return s
     if data.get("schema") != 1:
         add("unreadable", AMBER, "The Black Ops summary is in a format this report does not know",
-            "It was probably written by a newer Black Ops.", "Update Security Scan.")
+            "It was probably written by a newer Black Ops.", "Update Spycatcher.")
         s.headline = "The summary could not be read, so privacy is not being checked."
         return s
 
@@ -2981,7 +2983,7 @@ def privacy(now, reg, location=None):
 # --- helpers -----------------------------------------------------------------
 
 # Where the weekly timer and the bar widget keep their pages.
-REPORT_DIR = Path.home() / ".local/share/security-report"
+REPORT_DIR = Path.home() / ".local/share/spycatcher"
 
 
 def _make_private(path, want_dir):
@@ -3081,7 +3083,7 @@ def text_report(sections, overall, start, end, colour, show_all=False):
     def c(r, t):
         return f"{ANSI[r]}{t}\033[0m" if colour else t
     bold = (lambda t: f"\033[1m{t}\033[0m") if colour else (lambda t: t)
-    out = [bold(f"Security report, {start:%a %d %b} to {end:%a %d %b %Y}"),
+    out = [bold(f"Spycatcher report, {start:%a %d %b} to {end:%a %d %b %Y}"),
            f"Overall: {c(overall, DOT[overall] + ' ' + LABEL[overall])}. {overall_line(overall, sections)}", ""]
     for s in sections:
         out.append(f"{c(s.rating, DOT[s.rating] + ' ' + LABEL[s.rating]):<8}  {bold(plain(s.title))}")
@@ -3124,7 +3126,7 @@ def html_report(sections, overall, start, end):
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Security report</title>
+<title>Spycatcher report</title>
 <style>
 :root {{ --bg:#f6f6f4; --card:#fff; --ink:#1d1d1b; --muted:#5f5f5a; --line:#e2e2dd;
   --green:#1f7a3f; --green-bg:#e3f3e8; --amber:#8a5a00; --amber-bg:#fdf0d5;
@@ -3160,7 +3162,7 @@ li {{ display:flex; gap:10px; padding:10px 0; border-top:1px solid var(--line); 
 .detail {{ color:var(--muted); overflow-wrap:anywhere; }}
 .action {{ margin-top:4px; }}
 </style></head><body><main>
-<h1>Security report</h1>
+<h1>Spycatcher report</h1>
 <p class="sub">{start:%a %d %b} to {end:%a %d %b %Y}, generated {end:%H:%M}</p>
 <div class="overall"><span class="pill {overall}">{LABEL[overall]}</span>
 <span>{e(overall_line(overall, sections))}</span></div>
@@ -3191,22 +3193,22 @@ def acknowledge(ids, reason, unack, now, since):
     can silence a red. Each acknowledgement records every file of the item in
     the state it is in now, and is noted in the journal."""
     if os.geteuid() != 0:
-        print("security-report: acknowledging needs root: sudo security-report --ack ...",
+        print("spycatcher-report: acknowledging needs root: sudo spycatcher-report --ack ...",
               file=sys.stderr)
         return 2
     acks = load_acks()
     if unack:
         kept = [x for x in acks if x.get("id") != unack]
         if len(kept) == len(acks):
-            print(f"security-report: no acknowledgement {unack}", file=sys.stderr)
+            print(f"spycatcher-report: no acknowledgement {unack}", file=sys.stderr)
             return 1
         write_acks(kept)
-        subprocess.run(["logger", "-t", "security-report", f"acknowledgement {unack} removed"],
+        subprocess.run(["logger", "-t", "spycatcher-report", f"acknowledgement {unack} removed"],
                        check=False)
         print(f"removed {unack}")
         return 0
     if not reason or not reason.strip():
-        print("security-report: say what was checked: --reason \"...\"", file=sys.stderr)
+        print("spycatcher-report: say what was checked: --reason \"...\"", file=sys.stderr)
         return 2
     integrity(now, since)
     # "amber" stands for every open amber item with no file in a sensitive
@@ -3217,8 +3219,8 @@ def acknowledge(ids, reason, unack, now, since):
         ids = [i for i in ids if i != "amber"] + sorted(AMBER_GROUPS)
     missing = [i for i in ids if i not in FOUND_GROUPS]
     if missing:
-        print(f"security-report: no open item {', '.join(missing)}; "
-              "run security-report to see the current IDs", file=sys.stderr)
+        print(f"spycatcher-report: no open item {', '.join(missing)}; "
+              "run spycatcher-report to see the current IDs", file=sys.stderr)
         return 1
     by = os.environ.get("SUDO_USER") or "root"
     for i in ids:
@@ -3234,7 +3236,7 @@ def acknowledge(ids, reason, unack, now, since):
             print(f"  {i}: and {len(folders) - 15} more folder(s)")
         acks.append({"id": i, "when": now.isoformat(), "by": by, "reason": plain(reason.strip()),
                      "paths": paths})
-        subprocess.run(["logger", "-t", "security-report",
+        subprocess.run(["logger", "-t", "spycatcher-report",
                         f"{by} acknowledged {i} ({len(paths)} file(s)): {plain(reason.strip())}"],
                        check=False)
         print(f"acknowledged {i}: {len(paths)} file(s)")
@@ -3251,26 +3253,26 @@ def main():
     ap.add_argument("--html", metavar="FILE")
     ap.add_argument("--status", action="store_true", help="print only the overall rating")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
-    # For security-scan, so the scan and this report read install scripts
+    # For spycatcher-scan, so the scan and this report read install scripts
     # with one parser. Prints the resolved target, or exits 1.
     ap.add_argument("--scriptlet-link-target", nargs=2, metavar=("SCRIPT", "LINK"),
                     help=argparse.SUPPRESS)
-    # For security-scan: checks a link listed in scan.conf's SCRIPTLET_LINKS.
+    # For spycatcher-scan: checks a link listed in scan.conf's SCRIPTLET_LINKS.
     # Prints the package, or exits 1.
     ap.add_argument("--listed-link", nargs=2, metavar=("CONF", "LINK"), help=argparse.SUPPRESS)
-    # For security-scan: checks a file whose install script gives it a group
+    # For spycatcher-scan: checks a file whose install script gives it a group
     # and the setgid bit. Prints the package, or exits 1.
     ap.add_argument("--scriptlet-setgid", metavar="PATH", help=argparse.SUPPRESS)
-    # For security-scan: exits 0 when a changed boot file is only
+    # For spycatcher-scan: exits 0 when a changed boot file is only
     # limine-snapper-sync's snapshot bookkeeping, see limine_snapshot_change.
     ap.add_argument("--limine-snapshot-change", nargs=3, metavar=("PATH", "REFERENCE", "SINCE"),
                     help=argparse.SUPPRESS)
-    # For security-scan: reads owner and path pairs, each "OWNER\x1fPATH\0",
+    # For spycatcher-scan: reads owner and path pairs, each "OWNER\x1fPATH\0",
     # on standard input, so no path reaches a command line, and prints
     # "PATH\x1fREASON\0" for each file explain_changes() explains.
     ap.add_argument("--explain-changes", nargs=2, metavar=("CONF", "PACMAN_LOG"),
                     help=argparse.SUPPRESS)
-    # For security-scan: exits 0 when /usr/lib/modules/VERSION belongs to a
+    # For spycatcher-scan: exits 0 when /usr/lib/modules/VERSION belongs to a
     # kernel that is no longer installed, see old_kernel_modules.
     ap.add_argument("--old-kernel-modules", metavar="VERSION", help=argparse.SUPPRESS)
     ap.add_argument("--ack", nargs="+", metavar="ID",
@@ -3279,7 +3281,7 @@ def main():
     ap.add_argument("--reason", metavar="TEXT", help="why the items in --ack are harmless")
     ap.add_argument("--unack", metavar="ID", help="as root: remove an acknowledgement")
     ap.add_argument("--acks", action="store_true", help="list acknowledgements")
-    # For security-scan: prints the AIDE logs that still hold a red nobody
+    # For spycatcher-scan: prints the AIDE logs that still hold a red nobody
     # has acknowledged, one per line, which pruning keeps.
     ap.add_argument("--keep-logs", action="store_true", help=argparse.SUPPRESS)
     a = ap.parse_args()
@@ -3363,7 +3365,7 @@ def main():
     try:
         reg = tomllib.loads(REGISTER.read_text())
     except (OSError, tomllib.TOMLDecodeError) as err:
-        print(f"security-report: cannot read {REGISTER}: {err}", file=sys.stderr)
+        print(f"spycatcher-report: cannot read {REGISTER}: {err}", file=sys.stderr)
         reg = {}
 
     sections = [
@@ -3397,7 +3399,7 @@ def main():
         try:
             write_private(Path(a.html), html_report(sections, overall, since, now))
         except OSError as err:
-            print(f"security-report: cannot write {a.html}: {err}", file=sys.stderr)
+            print(f"spycatcher-report: cannot write {a.html}: {err}", file=sys.stderr)
             return 2
         print(a.html)
     else:

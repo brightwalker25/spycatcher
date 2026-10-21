@@ -32,8 +32,8 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
-SCAN = ROOT / "bin/security-scan"
+SCRIPT = ROOT / "bin/spycatcher-report"
+SCAN = ROOT / "bin/spycatcher-scan"
 
 REASON_RED = "unpackaged file in a system code path"
 REASON_AMBER = "not from a package, confirm it was you"
@@ -41,8 +41,8 @@ REASON_REMOVED = "unpackaged file removed"
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
@@ -64,7 +64,7 @@ def write_log(folder, when, *lines, rules=4):
     """An AIDE log for a run at `when`, in the scan's format."""
     stamp = when.astimezone().isoformat()
     text = (f"=== aide run at {stamp} ===\n"
-            f"graded by security-scan rules {rules}\n"
+            f"graded by spycatcher rules {rules}\n"
             + "".join(line + "\n" for line in lines)
             + "summary: 0 unexplained, 0 to confirm, 0 from package updates\n"
             f"=== done at {stamp} ===\n")
@@ -177,6 +177,26 @@ class Findings(Files):
         self.assertEqual(self.items(s, self.r.RED), [])
         self.assertEqual(s.rating, self.r.GREEN)
         self.assertEqual(self.r.OPEN_RED_LOGS, set())
+
+    def test_the_rules_version_is_read_under_the_old_and_the_new_name(self):
+        # Logs written before 0.4.0, as Security Scan, name the rules by the
+        # project's earlier name. Both forms mark a log graded by the current
+        # rules; a log with neither line is re-checked as an old one.
+        stamp = self.day(1).astimezone().isoformat()
+        for name, current in (("spycatcher", True), ("security-scan", True), (None, False)):
+            with self.subTest(name=name):
+                for p in self.logdir.iterdir():
+                    p.unlink()
+                rules = f"graded by {name} rules {self.r.RULES_VERSION}\n" if name else ""
+                (self.logdir / "aide-20261019-100000.log").write_text(
+                    f"=== aide run at {stamp} ===\n{rules}{red('/usr/lib/tool/a')}\n"
+                    "summary: 0 unexplained, 0 to confirm, 0 from package updates\n"
+                    f"=== done at {stamp} ===\n")
+                self.r.recheck.reset_mock()
+                self.integrity()
+                self.assertTrue(self.r.recheck.called)
+                self.assertEqual(self.r.recheck.call_args.args[-1], current)
+        self.assertIsNone(self.r.RULES_LINE.search("| graded by spycatcher rules 4\n"))
 
     def test_reds_in_one_folder_on_one_day_are_one_item(self):
         self.log(self.day(2, 9), red("/usr/lib/tool/a"))
@@ -320,7 +340,7 @@ class GroupIds(Files):
         (gid,) = self.r.FOUND_GROUPS
         item = self.items(s, self.r.RED)[0]
         self.assertIn(f"Item {gid},", item[2])
-        self.assertIn(f"sudo security-report --ack {gid} --reason", item[3])
+        self.assertIn(f"sudo spycatcher-report --ack {gid} --reason", item[3])
 
 
 class FindingGroups(unittest.TestCase):
@@ -581,7 +601,7 @@ class UnknownState(Files):
 
 
 class Acknowledge(Files):
-    """sudo security-report --ack / --unack."""
+    """sudo spycatcher-report --ack / --unack."""
 
     def setUp(self):
         super().setUp()
@@ -675,7 +695,7 @@ class Acknowledge(Files):
     def test_noted_in_the_journal(self):
         self.ack([self.red_id], env={"SUDO_USER": "alice"})
         cmds = [c.args[0] for c in self.run_cmd.call_args_list]
-        self.assertIn(["logger", "-t", "security-report",
+        self.assertIn(["logger", "-t", "spycatcher-report",
                        f"alice acknowledged {self.red_id} (1 file(s)): my own build"], cmds)
 
     def test_amber_stands_for_every_open_amber_item_outside_sensitive_folders(self):
@@ -736,7 +756,7 @@ class Main(Files):
 
     def main(self, *args):
         out, err = io.StringIO(), io.StringIO()
-        with mock.patch.object(sys, "argv", ["security-report", *args]), \
+        with mock.patch.object(sys, "argv", ["spycatcher-report", *args]), \
              contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = self.r.main()
         return code, out.getvalue(), err.getvalue()
@@ -798,8 +818,8 @@ class Main(Files):
 
 
 class Prune(unittest.TestCase):
-    """security-scan's prune(), taken from the script with its log() and run
-    in bash with $0 naming a script beside a stand-in security-report."""
+    """spycatcher-scan's prune(), taken from the script with its log() and run
+    in bash with $0 naming a script beside a stand-in spycatcher-report."""
 
     KEEP = 2
 
@@ -809,7 +829,7 @@ class Prune(unittest.TestCase):
         base = Path(os.path.realpath(self.tmp.name))
         self.bin = base / "bin"
         self.bin.mkdir()
-        (self.bin / "security-scan").write_text("")
+        (self.bin / "spycatcher-scan").write_text("")
         self.logdir = base / "log"
         self.logdir.mkdir()
         self.scanlog = base / "scan.log"
@@ -830,14 +850,14 @@ class Prune(unittest.TestCase):
         return out
 
     def report(self, lines, code=0):
-        (self.bin / "security-report").write_text(
+        (self.bin / "spycatcher-report").write_text(
             f"import sys\nsys.stdout.write({''.join(l + chr(10) for l in lines)!r})\n"
             f"sys.exit({code})\n")
 
     def prune(self, mode, script_path=None):
         script = ('eval "$(sed -n -e \'/^log() /p\' -e \'/^prune() {/,/^}/p\' "$SCAN")"\n'
                   f'MODE=$1 LOG_DIR=$2 LOG=$3 KEEP={self.KEEP}\nprune\n')
-        r = subprocess.run(["bash", "-c", script, str(script_path or self.bin / "security-scan"),
+        r = subprocess.run(["bash", "-c", script, str(script_path or self.bin / "spycatcher-scan"),
                             mode, str(self.logdir), str(self.scanlog)],
                            env={"PATH": os.environ["PATH"], "SCAN": str(SCAN)},
                            capture_output=True, text=True)
@@ -880,7 +900,7 @@ class Prune(unittest.TestCase):
     def test_with_the_real_report(self):
         # The report is given LOG_DIR, so it reads these logs; nothing here
         # is acknowledged, since no acknowledgement names these paths.
-        logs = self.logs("aide", 5, lines=[red("/nonexistent/security-scan-test/tool")])
+        logs = self.logs("aide", 5, lines=[red("/nonexistent/spycatcher-test/tool")])
         self.assertEqual(self.prune("aide", script_path=SCAN), sorted([logs[0]] + logs[3:]))
 
 

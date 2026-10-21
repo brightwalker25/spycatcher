@@ -14,7 +14,7 @@ groups looked up only in the local files and systemd. Otherwise the folder
 is kept 0700 for root and the lynis copy 0600, and the scan says so on
 stderr.
 
-The tests run a copy of bin/security-scan in lynis mode with id reporting
+The tests run a copy of bin/spycatcher-scan in lynis mode with id reporting
 root, getent reading a fake passwd and group file, and lynis and runuser
 replaced by stand-ins. install is wrapped to record its arguments and then
 run without -o and -g, so the modes are real while no ownership is changed.
@@ -32,7 +32,7 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-scan"
+SCRIPT = ROOT / "bin/spycatcher-scan"
 
 RECORD = """#!/bin/bash
 printf '%s\\x1f' "${0##*/}" "$@" >>"$CALLS/all"
@@ -136,7 +136,7 @@ class LogGroup(unittest.TestCase):
                          ("/var/log/lynis-report.dat", str(self.report))):
             self.assertIn(old, text)
             text = text.replace(old, new)
-        self.script = base / "scan/security-scan"
+        self.script = base / "scan/spycatcher-scan"
         self.script.write_text(text)
 
         self.env = dict(os.environ,

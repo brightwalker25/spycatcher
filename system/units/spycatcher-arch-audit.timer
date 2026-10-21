@@ -2,7 +2,7 @@
 Description=Daily CVE check of installed packages (arch-audit)
 
 [Timer]
-Unit=security-scan@arch-audit.service
+Unit=spycatcher@arch-audit.service
 OnCalendar=daily
 # Spread the hit on the Arch security tracker, and don't fire mid-login.
 RandomizedDelaySec=2h

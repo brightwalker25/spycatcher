@@ -1,4 +1,4 @@
-"""Checks for how security-report re-reads RED lines in the integrity section.
+"""Checks for how spycatcher-report re-reads RED lines in the integrity section.
 
 Run from the repository root:
 
@@ -21,7 +21,7 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
+SCRIPT = ROOT / "bin/spycatcher-report"
 
 LINK = "/usr/bin/tool"
 TARGET = "/usr/lib/tool/tool-avx512"
@@ -31,8 +31,8 @@ SCRIPT_TEXT = f'ln -sf {TARGET} {LINK}\n'
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
@@ -145,7 +145,7 @@ class ScriptletLinkTest(unittest.TestCase):
 
 
 class ScriptletLinkTargetCommandTest(unittest.TestCase):
-    """The hidden --scriptlet-link-target option that security-scan calls, run
+    """The hidden --scriptlet-link-target option that spycatcher-scan calls, run
     as a real process against real links in a temporary folder."""
 
     def setUp(self):
@@ -384,7 +384,7 @@ class EmptyListChangesNothingTest(unittest.TestCase):
 
 
 class ListedLinkCommandTest(unittest.TestCase):
-    """The hidden --listed-link option that security-scan calls, run as a
+    """The hidden --listed-link option that spycatcher-scan calls, run as a
     real process. A scan.conf in a temporary folder is not root's, so it
     must be ignored and the link left red."""
 
@@ -453,7 +453,7 @@ WROTE_AT = 1790766828
 
 
 class LimineSnapshotTest(unittest.TestCase):
-    """limine_snapshot_change, which security-scan runs through the hidden
+    """limine_snapshot_change, which spycatcher-scan runs through the hidden
     --limine-snapshot-change option for a boot file that changed with no
     package update."""
 
@@ -462,7 +462,7 @@ class LimineSnapshotTest(unittest.TestCase):
 
     def explains(self, path="/boot/limine.conf", text=ROTATED, reference=REFERENCE,
                  journal=((WROTE_AT, "Updated: /boot/limine.conf"),), mtime=WROTE_AT):
-        files = {path: text, "/var/lib/security-scan/limine.conf": reference}
+        files = {path: text, "/var/lib/spycatcher/limine.conf": reference}
 
         def read_text(path_self):
             content = files.get(str(path_self))
@@ -482,7 +482,7 @@ class LimineSnapshotTest(unittest.TestCase):
         with mock.patch.object(self.r.Path, "read_text", read_text), \
              mock.patch.object(self.r.subprocess, "run", side_effect=run), \
              mock.patch.object(self.r.os, "stat", return_value=stat):
-            return self.r.limine_snapshot_change(path, "/var/lib/security-scan/limine.conf",
+            return self.r.limine_snapshot_change(path, "/var/lib/spycatcher/limine.conf",
                                                  WROTE_AT - 3600)
 
     def test_a_snapshot_menu_only_change_is_explained(self):
@@ -707,7 +707,7 @@ class ScannerPacmanPatternTest(unittest.TestCase):
     """The scanner's awk count of package transactions, run on a sample log."""
 
     def count(self, log, since="2026-09-28T19:08:10"):
-        src = (ROOT / "bin/security-scan").read_text()
+        src = (ROOT / "bin/spycatcher-scan").read_text()
         prog = re.search(r"'(/\\\[ALPM\\\] \(upgraded[^']*)'", src).group(1)
         with tempfile.NamedTemporaryFile("w", suffix=".log") as f:
             f.write(log)

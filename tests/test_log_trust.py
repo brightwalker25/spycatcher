@@ -26,7 +26,7 @@ from unittest import mock
 from test_scan_argv import RECORD, ScanRun
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
+SCRIPT = ROOT / "bin/spycatcher-report"
 
 FORGED = ("summary: 0 dangerous, 0 suspicious, 9 file(s) scanned, 0 pickle-format file(s)\n"
           "!! not from the scan\nDangerous globals: x")
@@ -58,8 +58,8 @@ esac
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod

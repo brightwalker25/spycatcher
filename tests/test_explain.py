@@ -24,12 +24,12 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
+SCRIPT = ROOT / "bin/spycatcher-report"
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
@@ -617,7 +617,7 @@ class IntegritySection(unittest.TestCase):
 
 
 class ExplainChangesCommand(unittest.TestCase):
-    """The hidden --explain-changes option security-scan calls, as a real
+    """The hidden --explain-changes option spycatcher-scan calls, as a real
     process: paths arrive on standard input, never as arguments."""
 
     def test_reads_records_and_prints_nothing_it_cannot_explain(self):
@@ -694,7 +694,7 @@ class ReportSpeed(unittest.TestCase):
         now = self.r.dt.datetime(2026, 10, 21, 12, 0)
         lines = "".join(f"RED changed /usr/bin/t{i} (unpackaged file in a system code path)\n"
                         for i in range(50))
-        lines = (f"graded by security-scan rules {self.r.RULES_VERSION}\n" + lines
+        lines = (f"graded by spycatcher rules {self.r.RULES_VERSION}\n" + lines
                  + "=== done at 2026-10-21T11:00:00+01:00 ===\n")
         with mock.patch.object(self.r, "logs", return_value=([(now, "log")], None)), \
              mock.patch.object(self.r, "read", return_value=lines), \

@@ -8,7 +8,7 @@ Run from the repository root:
 A kernel update changes tens of thousands of files. The scan used to ask
 pacman about each one in turn, which ran past the unit's 45 minute limit, so
 the baseline never moved and every later run met the same pile. These tests
-run a copy of bin/security-scan with aide and pacman replaced by stand-ins
+run a copy of bin/spycatcher-scan with aide and pacman replaced by stand-ins
 that answer from files the test writes, as in test_scan_argv.py. Nothing
 reads the real pacman database, /var/lib or /var/log.
 """
@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # prints them; $FAKE/qkk.out and $FAKE/qkk.err are pacman -Qkk's output, to
 # which a total line per package is added unless $FAKE/qkk.short exists;
 # $FAKE/ql.fail makes -Ql fail. -Qqo reads its path from standard input, as
-# security-report asks it, and looks it up in $FAKE/ql.
+# spycatcher-report asks it, and looks it up in $FAKE/ql.
 PACMAN = RECORD + r"""f="$FAKE"
 case "$1" in
   -Ql)
@@ -73,13 +73,13 @@ class AideRun(ScanRun):
         (stubs / "aide").write_text(AIDE)
         for f in stubs.iterdir():
             f.chmod(0o755)
-        # The lock file, and security-report beside the copy of the scan, as
+        # The lock file, and spycatcher-report beside the copy of the scan, as
         # it is beside the installed one.
         text = self.script.read_text()
         self.assertIn("/var/lib/pacman/db.lck", text)
         self.lock = self.state / "db.lck"
         self.script.write_text(text.replace("/var/lib/pacman/db.lck", str(self.lock)))
-        shutil.copy(ROOT / "bin/security-report", self.script.parent / "security-report")
+        shutil.copy(ROOT / "bin/spycatcher-report", self.script.parent / "spycatcher-report")
         self.aide_dir = self.state / "aide"
         self.db = self.aide_dir / "aide.db.gz"
         self.db.write_text("baseline")
@@ -206,7 +206,7 @@ class Removed(AideRun):
         self.assertEqual(len([a for a in self.argv() if "--old-kernel-modules" in a]), 1)
 
     def test_modules_of_an_installed_kernel_stay_amber(self):
-        # The running kernel's: security-report asks the real pacman, by its
+        # The running kernel's: spycatcher-report asks the real pacman, by its
         # full path, so the stand-in cannot answer for it.
         here = f"/usr/lib/modules/{os.uname().release}"
         log = self.run_aide([f"f-----------------: {here}/kernel/m.ko"],
@@ -253,10 +253,10 @@ class CannotGrade(AideRun):
 
     def test_a_failed_explanation_call_is_logged(self):
         # Review L3: its exit code was not checked.
-        broken = self.script.parent / "security-report"
+        broken = self.script.parent / "spycatcher-report"
         broken.write_text("import sys\nsys.exit(3)\n")
         log = self.run_aide(["f+++++++++++++++++: /usr/bin/dropped"])
-        self.assertIn("!! security-report --explain-changes failed (exit 3)", log)
+        self.assertIn("!! spycatcher-report --explain-changes failed (exit 3)", log)
         self.assertIn("RED added /usr/bin/dropped (unpackaged file in a system code path)", log)
 
     def test_a_new_database_left_by_a_failed_run_is_not_used(self):
@@ -278,7 +278,7 @@ class CannotGrade(AideRun):
     def test_the_report_does_not_grade_a_set_aside_check(self):
         (self.fake / "txn").touch()
         self.run_aide(["f+++++++++++++++++: /usr/bin/dropped"])
-        r = subprocess.run(["python3", "-I", str(ROOT / "bin/security-report"), "--json"],
+        r = subprocess.run(["python3", "-I", str(ROOT / "bin/spycatcher-report"), "--json"],
                            env=dict(os.environ, LOG_DIR=str(self.logs),
                                     RISK_REGISTER=str(self.base / "none.toml")),
                            capture_output=True, text=True)
@@ -331,9 +331,9 @@ class ReviewPoCs(AideRun):
 class ModeOnlyAskedAbout(AideRun):
     def test_mode_only_mismatch_is_sent_for_explanation(self):
         # R2-1: a FAT /boot gives every file the mount's mode. The scan asks
-        # security-report about a package file whose only fault is its mode;
+        # spycatcher-report about a package file whose only fault is its mode;
         # a stand-in answers as the real one does for such a file.
-        fake = self.script.parent / "security-report"
+        fake = self.script.parent / "spycatcher-report"
         fake.write_text(
             "import sys\n"
             "if sys.argv[1] == '--explain-changes':\n"
@@ -347,7 +347,7 @@ class ModeOnlyAskedAbout(AideRun):
         self.assertIn("PKG changed /boot/amd-ucode.img (amd-ucode, mode from the mount)", log)
 
     def test_config_file_permissions_and_rebuilt_caches_are_sent_too(self):
-        fake = self.script.parent / "security-report"
+        fake = self.script.parent / "spycatcher-report"
         fake.write_text(
             "import sys\n"
             "if sys.argv[1] == '--explain-changes':\n"
@@ -385,16 +385,16 @@ def live_cups_tightened():
 class LiveCups(AideRun):
     """Round 4, C1, end to end on this machine's own printers.conf: the scan
     with pacman -Qkk answering in pacman 7.1's words, as it does for root,
-    and security-report reading the real file, backup list and package
+    and spycatcher-report reading the real file, backup list and package
     mode. Only pacman -Qkk is a stand-in, since as a user it cannot read the
     file to check its content."""
 
     def test_printers_conf_tightened_by_cupsd_is_amber(self):
         qkk = f"warning: cups: {LIVE_CUPS} (Permissions mismatch)\n"
-        wrapper = self.script.parent / "security-report"
+        wrapper = self.script.parent / "spycatcher-report"
         wrapper.write_text(
             "import importlib.machinery, importlib.util, sys\n"
-            f"loader = importlib.machinery.SourceFileLoader('r', {str(ROOT / 'bin/security-report')!r})\n"
+            f"loader = importlib.machinery.SourceFileLoader('r', {str(ROOT / 'bin/spycatcher-report')!r})\n"
             "spec = importlib.util.spec_from_loader('r', loader)\n"
             "r = importlib.util.module_from_spec(spec)\n"
             "loader.exec_module(r)\n"

@@ -1,7 +1,7 @@
 # Ruleset for the periodic gitleaks scan of the repositories under SCAN_ROOT.
 #
 # Extends the upstream default rules (AWS keys, GitHub tokens, private keys,
-# and so on). Installed as /etc/security-scan/gitleaks.toml only when that
+# and so on). Installed as /etc/spycatcher/gitleaks.toml only when that
 # file does not exist yet; edit the installed copy, not this one.
 
 [extend]

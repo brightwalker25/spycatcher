@@ -20,15 +20,15 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
+SCRIPT = ROOT / "bin/spycatcher-report"
 NOW = dt.datetime(2026, 10, 21, 12, 0)
 DONE = "=== aide run at x ===\nsummary: 0 unexplained, 0 to confirm, 5 from package updates\n"
 STOPPED = "=== aide run at x ===\nPKG changed /usr/bin/ls (coreutils, verified by pacman)\n"
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod

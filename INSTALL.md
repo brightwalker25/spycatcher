@@ -1,4 +1,4 @@
-# Installing Security Scan
+# Installing Spycatcher
 
 There are two parts to install. The scans, their timers and the weekly report
 are installed system-wide by a privileged installer, because the scans run as
@@ -41,10 +41,10 @@ piece completes the setup.
 ## Installing the scans
 
 ```bash
-git clone https://github.com/brightwalker25/omarchy-security-scan.git ~/Work/omarchy-security-scan
-cd ~/Work/omarchy-security-scan
-bin/security-scan-install --dry-run
-sudo bin/security-scan-install
+git clone https://github.com/brightwalker25/spycatcher.git ~/Work/spycatcher
+cd ~/Work/spycatcher
+bin/spycatcher-install --dry-run
+sudo bin/spycatcher-install
 ```
 
 The dry run needs no root. It prints every command the installer would run
@@ -62,7 +62,7 @@ It installs, in order:
 
 1. The packages above, with `pacman -S --needed`.
 2. `picklescan` and `numpy`, with `uv`, into a virtual environment in
-   `/opt/security-scan/picklescan`, with the command linked as
+   `/opt/spycatcher/picklescan`, with the command linked as
    `/usr/local/bin/picklescan`. It goes in a root-owned folder rather than your
    `~/.local` because it runs as root. Both come from PyPI, so they are pinned
    to the exact versions and SHA-256 hashes in
@@ -74,13 +74,13 @@ It installs, in order:
    before re-running the installer. `uv pip sync` makes the environment match the
    file exactly, and it is rebuilt when Arch moves to a new Python version. numpy is there
    because picklescan needs it to read `.npy` files.
-3. `security-scan` and `security-report`, copied into `/usr/local/bin`.
-4. The configuration in `/etc/security-scan`, described under
+3. `spycatcher-scan` and `spycatcher-report`, copied into `/usr/local/bin`.
+4. The configuration in `/etc/spycatcher`, described under
    [Configuration](#configuration).
-5. The system units: `security-scan@.service` and one timer per scan, all
+5. The system units: `spycatcher@.service` and one timer per scan, all
    enabled and started.
-6. The weekly report's units, `security-report.service` and
-   `security-report.timer`, as user units in `/etc/systemd/user`, enabled for
+6. The weekly report's units, `spycatcher-report.service` and
+   `spycatcher-report.timer`, as user units in `/etc/systemd/user`, enabled for
    every user and started for the desktop user.
 7. The first baselines for AIDE and rkhunter, described under
    [First run](#first-run).
@@ -90,25 +90,81 @@ everything else is brought up to date with the checkout. After pulling a new
 version of the repository, run it again: until you do, the installed programs
 and units stay as they were.
 
+### Moving from Security Scan
+
+Spycatcher was called Security Scan before 0.4.0. When the installer finds an
+install under the old names, it moves it to the new ones. Run
+`bin/spycatcher-install --dry-run` first to see every step, then:
+
+```bash
+sudo bin/spycatcher-install
+omarchy-restart-shell
+```
+
+In order, it:
+
+1. Stops and disables the old timers, `security-scan-*.timer`, and the old
+   weekly report timer for every user.
+2. Renames `/etc/security-scan`, `/var/log/security-scan` and
+   `/var/lib/security-scan` to `/etc/spycatcher`, `/var/log/spycatcher` and
+   `/var/lib/spycatcher`, each only when the new folder does not exist or is
+   empty. If an old and a new folder both hold files, it refuses before
+   changing anything, and you merge them by hand. It also refuses while a scan
+   under the old name is running. As you, not as root, it renames
+   `~/.local/share/security-report` to `~/.local/share/spycatcher` and points
+   `latest.html` at the moved page.
+3. Builds the picklescan environment afresh in `/opt/spycatcher/picklescan`,
+   points `/usr/local/bin/picklescan` at it, and removes the old environment
+   in `/opt/security-scan` if this installer made it.
+4. Installs `spycatcher-scan`, `spycatcher-report` and the new units, then
+   removes `security-scan`, `security-report` and the old units, each only
+   when it passes the same checks as an upgrade. An old unit you edited is
+   left in place and listed, since it now runs a program that is gone.
+5. Regenerates `aide.conf` for the new paths, keeping a backup of the old one.
+6. Enables the new timers.
+7. Re-baselines AIDE with `aide --init`, so that the renamed folders, programs
+   and units are not reported by the next check. This reads every watched
+   file and takes several minutes.
+8. As you, renames the plugin link
+   `~/.config/omarchy/plugins/brightwalker25.security-scan` to
+   `brightwalker25.spycatcher`, pointing at the same checkout, and changes the
+   plugin id in `~/.config/omarchy/shell.json`. The file is read as JSON and
+   written back whole through a temporary file, so every other entry and
+   setting, such as `reportDays`, is kept. If the file is missing or is not
+   valid JSON, it is left alone and the installer says so.
+
+The re-baseline in step 7 takes in any change made since the last daily AIDE
+check without reporting it. To report those first, pass `--final-check`,
+which runs one more AIDE check under the old names before anything moves and
+adds several minutes. Each step looks at what it would change and skips what
+is already done, so a second run, or a run after one that was interrupted,
+carries on where the first stopped. When the move is complete, the installer
+writes `/var/lib/spycatcher/.migrated-from-security-scan`.
+
+Old logs record `graded by security-scan rules N`; the report reads that line
+as well as the new `graded by spycatcher rules N`, so the move loses no
+history. If you renamed the checkout, point the plugin link at its new folder
+by hand.
+
 ### Files that are not this plugin's
 
 Before it changes anything, packages included, the installer checks every path
 it would write over. A unit in `/etc/systemd/system` or `/etc/systemd/user` is
 replaced only when it is a regular file, not a symlink, owned by root, whose
 content is exactly a unit this plugin has shipped, in this checkout or in an
-earlier release. `security-scan` and `security-report` in `/usr/local/bin` are
-replaced only when they are this plugin's programs. `/opt/security-scan` and
-`/etc/security-scan` must be real folders owned by root that only root can
-write to. `/opt/security-scan/picklescan` must be a Python virtual environment
+earlier release. `spycatcher-scan` and `spycatcher-report` in `/usr/local/bin` are
+replaced only when they are this plugin's programs. `/opt/spycatcher` and
+`/etc/spycatcher` must be real folders owned by root that only root can
+write to. `/opt/spycatcher/picklescan` must be a Python virtual environment
 that this installer made: it carries the marker file
-`.security-scan-installer`, or has picklescan installed in it, as earlier
+`.spycatcher-installer`, or has picklescan installed in it, as earlier
 releases left it. If any path holds something else, the installer lists each
 one with the reason and stops without changing the machine. The desktop user
 can never be root, under any name or as `--user 0`.
 
 A unit you have edited counts as yours, so it is not overwritten. To change one
 of this plugin's units, use a drop-in instead (`sudo systemctl edit
-security-scan-lynis.timer`, for example), which the installer never touches.
+spycatcher-lynis.timer`, for example), which the installer never touches.
 To go back to the shipped unit, delete the edited file and run the installer
 again.
 
@@ -126,8 +182,8 @@ folder, so it lists them and prints the commands to remove them.
 
 ### Why the programs are copied rather than linked
 
-`security-scan` runs as root on a timer, and `security-report` is run by the
-weekly report. If `/usr/local/bin/security-scan` were a symlink into the
+`spycatcher-scan` runs as root on a timer, and `spycatcher-report` is run by the
+weekly report. If `/usr/local/bin/spycatcher-scan` were a symlink into the
 checkout, anyone who can write to the checkout, which includes your own
 account and anything running as it, could change what root runs next. So both
 are copied, owned by root, and a change to the checkout does nothing until the
@@ -141,18 +197,18 @@ The plugin is installed from a checkout by linking it into the plugins folder.
 If you cloned the repository to install the scans, use that same checkout:
 
 ```bash
-ln -s ~/Work/omarchy-security-scan ~/.config/omarchy/plugins/brightwalker25.security-scan
-omarchy plugin enable brightwalker25.security-scan --section right
+ln -s ~/Work/spycatcher ~/.config/omarchy/plugins/brightwalker25.spycatcher
+omarchy plugin enable brightwalker25.spycatcher --section right
 ```
 
 The plugin id is the link name, so the link has to be named exactly
-`brightwalker25.security-scan` whatever the checkout is called. If `enable`
+`brightwalker25.spycatcher` whatever the checkout is called. If `enable`
 reports that it cannot find the plugin, ask the shell to look again and then
 enable it:
 
 ```bash
 omarchy-shell shell rescanPlugins
-omarchy plugin enable brightwalker25.security-scan --section right
+omarchy plugin enable brightwalker25.spycatcher --section right
 ```
 
 `--before <id>`, `--after <id>` and `--index <n>` place the lock next to a
@@ -160,7 +216,7 @@ particular widget rather than at the end of the row, for example next to VPN
 Check:
 
 ```bash
-omarchy plugin enable brightwalker25.security-scan --section right --after brightwalker25.vpn-check
+omarchy plugin enable brightwalker25.spycatcher --section right --after brightwalker25.vpn-check
 ```
 
 After editing the QML, restart the shell to see the change:
@@ -172,12 +228,12 @@ omarchy-restart-shell
 Validate the manifest after editing it:
 
 ```bash
-omarchy plugin validate ~/Work/omarchy-security-scan
+omarchy plugin validate ~/Work/spycatcher
 ```
 
-The widget runs `/usr/local/bin/security-report --json`, and falls back to
+The widget runs `/usr/local/bin/spycatcher-report --json`, and falls back to
 the copy inside the plugin if the installed one is missing or too old to
-support `--json`. Either way it needs the logs in `/var/log/security-scan`,
+support `--json`. Either way it needs the logs in `/var/log/spycatcher`,
 which only exist once the scans have been installed and have run.
 
 ## First run
@@ -208,7 +264,7 @@ gitleaks finding as a possible secret in red. That is expected: see [Writing a r
 
 ## Configuration
 
-Everything lives in `/etc/security-scan`, owned by root. These files hold
+Everything lives in `/etc/spycatcher`, owned by root. These files hold
 private names and paths, so no other local user can read them. The report
 runs as the desktop user, so the two it reads are shared with that user's own
 group; the rest are root's alone.
@@ -393,12 +449,12 @@ at the foot of the panel.
 Start a scan through its unit, so that it runs exactly as the timer runs it:
 
 ```bash
-sudo systemctl start security-scan@aide.service
+sudo systemctl start spycatcher@aide.service
 ```
 
 The instances are `arch-audit`, `aide`, `models`, `gitleaks`, `rkhunter` and
 `lynis`. The command returns when the scan finishes. Each run writes a log in
-`/var/log/security-scan`, named by scan and time, and the last 12 logs of each
+`/var/log/spycatcher`, named by scan and time, and the last 12 logs of each
 scan are kept. The folder belongs to root and your group (0750), and the copy
 of the lynis report in it is 0640, so reading the logs and running the report
 need no `sudo`. "Your group" means the same here as in
@@ -413,13 +469,13 @@ To point one run somewhere else without editing `scan.conf`, run the script
 directly with the variable set:
 
 ```bash
-sudo env SCAN_ROOT=/home/your-user/Projects /usr/local/bin/security-scan gitleaks
+sudo env SCAN_ROOT=/home/your-user/Projects /usr/local/bin/spycatcher-scan gitleaks
 ```
 
 The report reads the logs from the last seven days:
 
 ```bash
-security-report
+spycatcher-report
 ```
 
 | Flag | Effect |
@@ -439,7 +495,7 @@ and the scan ages are measured from now whatever `--days` is set to.
 To produce this week's page and notification now rather than on Monday:
 
 ```bash
-systemctl --user start security-report.service
+systemctl --user start spycatcher-report.service
 ```
 
 ## Settings
@@ -458,13 +514,13 @@ and changes nothing about when the scans run.
 ## Troubleshooting
 
 The lock is amber and the panel shows an error in red at the bottom. The
-widget could not read the report: `security-report` did
+widget could not read the report: `spycatcher-report` did
 not run, exited with an error, or printed something that was not the expected
 JSON. The panel says which. Run the same command the
 widget runs:
 
 ```bash
-security-report --json
+spycatcher-report --json
 ```
 
 If the command is not found, the scans have not been installed and the copy
@@ -478,15 +534,15 @@ A scan is amber or red for running late. Check that its timer is enabled and
 when it last fired, and read the journal of its last run:
 
 ```bash
-systemctl list-timers 'security-scan-*'
-journalctl -u security-scan@gitleaks.service -n 50
+systemctl list-timers 'spycatcher-*'
+journalctl -u spycatcher@gitleaks.service -n 50
 ```
 
 Amber a day or two after a scan was due usually means the laptop was off or
 asleep through the scheduled time. The timers are persistent, so the scan runs
 at the next opportunity and the rating clears on its own. A scan that is red
 for having failed has an error in its log: open the newest file for that scan
-in `/var/log/security-scan`. A log that says `DESKTOP_USER is not set` means
+in `/var/log/spycatcher`. A log that says `DESKTOP_USER is not set` means
 `scan.conf` is missing or was ignored for not being owned by root.
 
 AIDE reports many changes after installing software. Packages installed with
@@ -513,15 +569,15 @@ If the file is owned by a package and `pacman -Qkk` reports no checksum or
 size mismatch for it, add an exception to `/etc/rkhunter.conf.local`, using
 the same kind of entry as the examples there (`SCRIPTWHITELIST` for a command
 shipped as a script, `ALLOWHIDDENFILE` for a hidden file, and so on). Then run
-the check again with `sudo systemctl start security-scan@rkhunter.service`. Do
+the check again with `sudo systemctl start spycatcher@rkhunter.service`. Do
 not add an exception for a file that pacman cannot verify.
 
 The weekly report did not appear. It runs as your user, so check the user
 timer rather than the system ones:
 
 ```bash
-systemctl --user list-timers security-report.timer
-journalctl --user -u security-report.service -n 50
+systemctl --user list-timers spycatcher-report.timer
+journalctl --user -u spycatcher-report.service -n 50
 ```
 
 If the installer reported older per-user copies of these units, remove them
@@ -530,46 +586,46 @@ as it said; until then they override the installed ones.
 ## Uninstalling
 
 ```bash
-sudo bin/security-scan-install --uninstall
+sudo bin/spycatcher-install --uninstall
 ```
 
 This stops and disables the plugin's timers, removes its system and user units,
-`security-scan`, `security-report`, the `picklescan` link if it points into
-`/opt/security-scan`, and the picklescan environment there. Of the uv tool
-folder that versions up to 0.2.1 made, `/opt/security-scan/tools`, it removes
-only picklescan, and the folder only if nothing else is in it. It removes only the exact names this
+`spycatcher-scan`, `spycatcher-report`, the `picklescan` link if it points into
+`/opt/spycatcher`, and the picklescan environment there. It removes only the exact names this
 plugin installs, and only files that pass the same checks as an install, so a
-unit of your own with a similar name, such as `security-scan-foo.timer`, is
-never disabled or removed. A unit you have edited, a program of the same name
-from somewhere else, and anything else you put in `/opt/security-scan` are
-left in place and listed at the end, along with any other `security-scan*` or
-`security-report*` units found, which may have depended on this plugin.
+unit of your own with a similar name, such as `spycatcher-foo.timer`, is
+never disabled or removed. Anything still under the names from before 0.4.0
+is left alone and listed; run the installer without `--uninstall` first to
+move it. A unit you have edited, a program of the same name
+from somewhere else, and anything else you put in `/opt/spycatcher` are
+left in place and listed at the end, along with any other `spycatcher*` or
+`spycatcher-report*` units found, which may have depended on this plugin.
 
 It also leaves in place, because they hold your settings, history and
 baselines:
 
 | Left in place | Holds |
 |---|---|
-| `/etc/security-scan` | configuration and risk register |
+| `/etc/spycatcher` | configuration and risk register |
 | `/etc/rkhunter.conf.local` | rkhunter exceptions |
-| `/var/log/security-scan` | scan logs |
+| `/var/log/spycatcher` | scan logs |
 | `/var/lib/aide` | AIDE baselines |
-| `/var/lib/security-scan` | trusted copy of limine.conf, and the package file lists of the last AIDE check |
-| `~/.local/share/security-report` | weekly HTML reports |
+| `/var/lib/spycatcher` | trusted copy of limine.conf, and the package file lists of the last AIDE check |
+| `~/.local/share/spycatcher` | weekly HTML reports |
 
 The packages (`arch-audit`, `lynis`, `gitleaks`, `rkhunter` and `aide`) are not
 removed, and neither is rkhunter's own database in `/var/lib/rkhunter`. To
 delete the rest:
 
 ```bash
-sudo rm -r /etc/security-scan /var/log/security-scan /var/lib/aide /var/lib/security-scan
-rm -r ~/.local/share/security-report
+sudo rm -r /etc/spycatcher /var/log/spycatcher /var/lib/aide /var/lib/spycatcher
+rm -r ~/.local/share/spycatcher
 ```
 
 To remove the widget, disable it and remove the symlink rather than the
 checkout:
 
 ```bash
-omarchy plugin disable brightwalker25.security-scan
-rm ~/.config/omarchy/plugins/brightwalker25.security-scan
+omarchy plugin disable brightwalker25.spycatcher
+rm ~/.config/omarchy/plugins/brightwalker25.spycatcher
 ```

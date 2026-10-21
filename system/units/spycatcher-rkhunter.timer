@@ -1,8 +1,8 @@
 [Unit]
-Description=Weekly secret scan of ~/Work repositories (gitleaks)
+Description=Weekly rootkit check (rkhunter)
 
 [Timer]
-Unit=security-scan@gitleaks.service
+Unit=spycatcher@rkhunter.service
 OnCalendar=Mon *-*-* 10:00:00
 RandomizedDelaySec=2h
 Persistent=true

@@ -22,13 +22,13 @@ from pathlib import Path
 from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
-SCAN = ROOT / "bin/security-scan"
+SCRIPT = ROOT / "bin/spycatcher-report"
+SCAN = ROOT / "bin/spycatcher-scan"
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
@@ -257,7 +257,7 @@ class OldLine(Files):
 
 class RulesVersion(unittest.TestCase):
     def test_scan_and_report_agree(self):
-        m = re.search(r'log "graded by security-scan rules (\d+)"', SCAN.read_text())
+        m = re.search(r'log "graded by spycatcher rules (\d+)"', SCAN.read_text())
         self.assertEqual(int(m.group(1)), load_report().RULES_VERSION)
         self.assertEqual(load_report().RULES_VERSION, 4)
 

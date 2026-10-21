@@ -1,4 +1,4 @@
-"""Checks for the Privacy (Black Ops) section of security-report.
+"""Checks for the Privacy (Black Ops) section of spycatcher-report.
 
 Run from the repository root:
 
@@ -26,13 +26,13 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = ROOT / "bin/security-report"
+SCRIPT = ROOT / "bin/spycatcher-report"
 FIXTURES = ROOT / "tests/fixtures/black-ops"
 
 
 def load_report():
-    loader = importlib.machinery.SourceFileLoader("security_report", str(SCRIPT))
-    spec = importlib.util.spec_from_loader("security_report", loader)
+    loader = importlib.machinery.SourceFileLoader("spycatcher_report", str(SCRIPT))
+    spec = importlib.util.spec_from_loader("spycatcher_report", loader)
     mod = importlib.util.module_from_spec(spec)
     loader.exec_module(mod)
     return mod
@@ -214,7 +214,7 @@ class Overall(unittest.TestCase):
                 R.installed_versions = lambda: {}
                 R.REGISTER = Path(env["RISK_REGISTER"])
                 os.environ.update(env)
-                sys.argv = ["security-report", *[a.replace("{tmp}", tmp) for a in args]]
+                sys.argv = ["spycatcher-report", *[a.replace("{tmp}", tmp) for a in args]]
                 out, err = io.StringIO(), io.StringIO()
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                     code = R.main()
