@@ -6,6 +6,33 @@ Notable changes to the Security Scan plugin and its scan suite. Versions follow
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-21
+
+### Changed
+
+- The bar no longer stays red for a week after harmless changes. The file
+  integrity section reports findings, not log lines: a path several checks
+  logged is one finding, and findings are grouped into items by folder (and,
+  for reds, by the day first seen), so one kernel update is one item rather
+  than 26,000 lines. The bar and the summary count items.
+- An unexplained file in a system code path that no package owns is amber,
+  not red, when it was last changed while pacman was running. Red is kept
+  for evidence: a package's file that fails pacman's check, a boot file
+  changed with no package update, and an unowned system file written while
+  pacman was not running.
+- A red stays in the report until it is acknowledged or a rule explains it,
+  rather than leaving after the window; the scan keeps the AIDE logs that
+  hold an open red. Ambers still leave with the window.
+
+### Added
+
+- `sudo security-report --ack ID --reason TEXT` records an item as checked,
+  and `--ack amber` records every amber item. The acknowledgement holds each
+  file's state, so a file that changes again is a new finding. `--acks`
+  lists them and `--unack ID` removes one. They are kept in
+  `/etc/security-scan/acknowledged.json`, which AIDE does not watch, are
+  noted in the journal, and are listed in the report as green items.
+
 ## [0.2.13] - 2026-10-21
 
 ### Fixed

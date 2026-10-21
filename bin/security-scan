@@ -198,7 +198,10 @@ prune() {
   # a red never ages out unseen. If the report cannot say, nothing goes.
   if [ "$MODE" = aide ] && [ -n "$old" ]; then
     bin="$(dirname -- "$(readlink -f -- "$0")")/security-report"
-    keep=$(py "$bin" --keep-logs 2>/dev/null) || return 0
+    if ! keep=$(env -i PATH="$PATH" LC_ALL=C LOG_DIR="$LOG_DIR" python3 -I "$bin" --keep-logs 2>&1); then
+      log "!! could not tell which old logs hold an open red, so none were removed"
+      return 0
+    fi
   fi
   [ -n "$old" ] && printf '%s\n' "$old" | grep -vxF -e "$keep" -e "" | xargs -r rm -f
   return 0

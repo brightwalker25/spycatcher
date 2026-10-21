@@ -92,7 +92,56 @@ rating of its items, and the overall rating is the worst of the sections.
 Green means there is no real exposure: the issue is fixed, not reachable, or
 not installed. Amber means the exposure is real but contained, and the report
 says how; it also covers changes that are probably yours but that only you can
-confirm. Red means something needs doing now.
+confirm. Red means something needs doing now, and in the file integrity
+section it is kept for evidence: a package's file that fails pacman's check,
+a boot file that changed with no package update, or a file in a system code
+path that no package owns and that was written while pacman was not running.
+
+### Findings, items and acknowledgements
+
+A bar that is always red is soon ignored, so the file integrity section
+reports findings rather than log lines, and lets you clear a finding once you
+have checked it.
+
+- A path that several checks logged is one finding, dated by the first check
+  that logged it.
+- Findings are grouped into items by the folder they are in, cut to its first
+  three levels. A red item also takes the day it was first seen, which tells
+  one event from another; an amber item is one folder. Files removed that no
+  package listed are one item a day, since an upgrade removes them from
+  hundreds of folders at once. One kernel update is therefore one item, not
+  thousands, and the bar counts items.
+- Each item has an eight-character ID, and the report prints the command
+  that clears it:
+
+  ```bash
+  sudo security-report --ack 3f9a1c2b --reason "kernel-modules-hook backup"
+  sudo security-report --ack amber --reason "my edits this week"   # every amber item
+  security-report --acks            # what has been acknowledged
+  sudo security-report --unack 3f9a1c2b
+  ```
+
+  An acknowledgement needs root, so nothing running as you can silence a red.
+  `--ack` lists how many files it covers in each folder before it records
+  them. It records each file of the item in the state it is in now (for a
+  file, its inode, size and change time; for a link, its target; for a
+  folder, its mode and owner) in `/etc/security-scan/acknowledged.json`,
+  readable by you and root, and notes it in the journal. It covers only what
+  was logged before it, and only while the file is in that state: a file
+  that changes again, or that a later check logs again, is a new finding.
+  A file in a folder you may not look into, such as `/etc/sudoers.d`, is
+  judged by the logs alone. The ID is made from the files in the item, so a
+  file that joins an item after you read the report gives it a new ID and
+  the old one no longer works. `--ack amber` leaves out any item with a file
+  where a change could give someone root or code that runs at boot or login
+  (sudoers, PAM, systemd, pacman's hooks, polkit, `/usr/local/bin` and the
+  like); those need their own IDs. Every acknowledgement is listed in the
+  report as a green item, and the headline says how many there are, so one
+  you did not make shows.
+- A red stays until it is acknowledged or a rule explains it; it does not
+  leave the report when it is a week old. The scan keeps every AIDE log that
+  still holds an open red when it prunes old logs. An amber leaves the report
+  with the window (`--days`, seven by default).
 
 The report covers nine sections: whether the scans ran on schedule, known
 package vulnerabilities, file integrity, rootkits, AI model files, secrets in
@@ -204,6 +253,13 @@ explains each change before it is reported:
   because it is common and harmless.
 - A file owned by a package that fails that check is red, and so is every
   file of a package whose file list (mtree) is missing.
+- A file in a system code path that no package owns, and that no rule below
+  explains, is amber when it was last changed while pacman was running: from
+  the hooks pacman runs before a transaction until the last line it logs for
+  that run. It reads "appeared during the package update of DATE, which no
+  rule explains". The same file written while pacman was not running is
+  red. `/boot`, `/etc`, `/usr/local`, `/opt`, `/root` and the home folders
+  keep their own grading.
 - A package's configuration file that you have edited is amber.
 - A removed file is a package change when it belonged to a package, at the
   last check, that pacman has since upgraded, removed, reinstalled or
@@ -496,6 +552,13 @@ useful, rather than for its signature list.
 
 AIDE comes from the AUR, not the official repositories, so `pacman -Syu` does
 not update it. Update it with your AUR helper, for example `yay -Syu`.
+
+A program already running as root that writes a file in a system code path
+while a real package update runs gets amber, not red, if no rule explains the
+file. A file's change time cannot be moved into a past update without
+changing the clock. An acknowledgement is only as good as the check behind
+it, and root can write `acknowledged.json`; the report lists every
+acknowledgement so that one you did not make is visible.
 
 The risk register is judgment written by hand. An entry is only as good as the
 assessment behind it, and a wrong entry makes a real finding look managed.

@@ -382,7 +382,7 @@ HOOK_REWRITTEN = {
 def hook_explains(line):
     """True when a RED checksum line is a file a local hook rewrites, the hook
     is still installed, and the file still passes its content check."""
-    m = re.match(r"changed (\S+) \(owned by \S+ but fails pacman's checksum\)$", line)
+    m = re.match(r"changed (.+) \(owned by \S+ but fails pacman's checksum\)$", line)
     if not m or m.group(1) not in HOOK_REWRITTEN:
         return False
     files, ok = HOOK_REWRITTEN[m.group(1)]
@@ -610,7 +610,7 @@ def scriptlet_link_explains(line):
     for the link's exact path points it at that same file. security-scan
     calls scriptlet_link_target() through --scriptlet-link-target, so both
     use this one parser."""
-    m = re.match(r"(?:added|changed) (\S+) \(unpackaged file in a system code path\)$", line)
+    m = re.match(r"(?:added|changed) (.+) \(unpackaged file in a system code path\)$", line)
     return bool(m and scriptlet_link_package(m.group(1)))
 
 
@@ -967,7 +967,7 @@ def listed_link_package(path, links):
 def listed_link_explains(line, links):
     """True when a RED unpackaged-file line is a link listed in scan.conf
     that listed_link_package() accepts."""
-    m = re.match(r"(?:added|changed) (\S+) \(unpackaged file in a system code path\)$", line)
+    m = re.match(r"(?:added|changed) (.+) \(unpackaged file in a system code path\)$", line)
     return bool(m and links and listed_link_package(m.group(1), links))
 
 
@@ -1968,7 +1968,7 @@ def unpackaged_explains(line, links, log, when=None, until=None, current=False):
     is not what the run saw. A line from a run that already used these rules
     (`current`) is only re-checked against scan.conf, whose lists the
     administrator may have added to since."""
-    m = re.match(r"(?:added|changed) (\S+) \(unpackaged file in a system code path\)$", line)
+    m = re.match(r"(?:added|changed) (.+) \(unpackaged file in a system code path\)$", line)
     if m:
         path = m.group(1)
         if current or until is None or not unchanged_since(path, until):
@@ -1981,14 +1981,14 @@ def unpackaged_explains(line, links, log, when=None, until=None, current=False):
         if found:
             return found[1]
         return MAYBE if written_in_pacman_run(path, log) else None
-    m = re.match(r"(?:added|changed) (\S+) \(owned by (\S+) but fails pacman's ownership or "
+    m = re.match(r"(?:added|changed) (.+) \(owned by (\S+) but fails pacman's ownership or "
                  r"permission check\)$", line)
     if m:
         path, owner = m.groups()
         if current or until is None or not unchanged_since(path, until):
             return None
         return PKG if mount_mode_explains(path, owner) else None
-    m = re.match(r"changed (\S+) \(owned by (\S+) but fails pacman's checksum\)$", line)
+    m = re.match(r"changed (.+) \(owned by (\S+) but fails pacman's checksum\)$", line)
     if m:
         path, owner = m.groups()
         if until is None or not unchanged_since(path, until):
@@ -2295,7 +2295,7 @@ RULES_LINE = re.compile(r"^graded by security-scan rules (\d+)$", re.M)
 def recheck(line, links, log, when, until, current):
     """The grade a RED line earns now (PKG or AMBER), or None to keep it red.
     See unpackaged_explains() for the conditions."""
-    path = line.split(" ", 2)[1] if line.count(" ") >= 2 else ""
+    path = line_path(line) or ""
     if until is None or not path.startswith("/") or not unchanged_since(path, until):
         return None
     if listed_link_explains(line, links):
@@ -2314,13 +2314,23 @@ def recheck(line, links, log, when, until, current):
 # `sudo security-report --ack ID` records as checked. A red stays until it is
 # acknowledged or a rule explains it; it does not age out of the window.
 
+_LOGGED = re.compile(r"(\w+) (/.+) \(([^()]*)\)$")
+
+
+def line_path(line):
+    """The path of an AIDE verdict line without its grade, such as
+    "added /usr/lib/x y (reason)". Paths may hold spaces; the reason is the
+    last bracket."""
+    m = _LOGGED.match(line)
+    return m.group(2) if m else None
+
+
 def file_state(path):
     """What `path` is now, for telling whether an acknowledged file has
     changed since: its type, and for a file its inode, size and change time,
     which no write leaves alone and which cannot be set back without moving
-    the clock. Read with lstat, so the report running as the desktop user
-    sees what root saw. "unknown" when a folder on the way may not be
-    searched."""
+    the clock. Read with lstat. "unknown" when a folder on the way may not be
+    searched by whoever runs the report."""
     try:
         st = os.lstat(path)
     except PermissionError:
@@ -2349,32 +2359,51 @@ def load_acks(path=None):
     acks = data.get("acks") if isinstance(data, dict) else None
     if not isinstance(acks, list):
         return []
-    return [a for a in acks if isinstance(a, dict) and isinstance(a.get("paths"), dict)]
+    return [a for a in acks if isinstance(a, dict) and isinstance(a.get("paths"), dict)
+            and _ack_when(a) is not None]
 
 
-def acked_paths(acks):
-    """{path: set of states} over every acknowledgement."""
-    out = {}
+def _ack_when(a):
+    try:
+        return dt.datetime.fromisoformat(str(a.get("when"))).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def acked_until(path, acks, states=None):
+    """The time of the latest acknowledgement that still covers `path`, or
+    None. It covers the path while the file is in the state it recorded; a
+    file the report may not look at (state "unknown") is taken as unchanged,
+    since only lines logged before the acknowledgement are covered and a
+    later change is logged again. `states` caches file_state()."""
+    best = None
     for a in acks:
-        for path, state in a["paths"].items():
-            if isinstance(path, str) and isinstance(state, str):
-                out.setdefault(path, set()).add(state)
-    return out
+        recorded = a["paths"].get(path)
+        if not isinstance(recorded, str):
+            continue
+        if states is not None and path in states:
+            now = states[path]
+        else:
+            now = file_state(path)
+            if states is not None:
+                states[path] = now
+        if now == recorded or (now == "unknown" and recorded != "absent"):
+            when = _ack_when(a)
+            best = when if best is None or when > best else best
+    return best
 
 
-def is_acked(path, acked):
-    """True when `path` was acknowledged in the state it is in now. A path
-    the desktop user may not look at counts as unchanged: the report cannot
-    tell, and root's own check at acknowledgement time saw it."""
-    states = acked.get(path)
-    if not states:
-        return False
-    now = file_state(path)
-    return now in states or (now == "unknown" and "absent" not in states)
+def group_id(kind, folder, day, paths):
+    """A name for a group that also binds its members: a file that joins the
+    group later gives it a new ID, so an acknowledgement covers only the
+    files the report showed."""
+    h = hashlib.sha256(f"aide\x1f{kind}\x1f{folder}\x1f{day}".encode())
+    for path in sorted(paths):
+        h.update(b"\x00" + path.encode(errors="surrogateescape"))
+    return h.hexdigest()[:8]
 
 
-def group_id(kind, folder, day):
-    return hashlib.sha256(f"aide\x1f{kind}\x1f{folder}\x1f{day}".encode()).hexdigest()[:8]
+REMOVED_UNLISTED = "unpackaged file removed"
 
 
 def finding_groups(kind, found):
@@ -2382,8 +2411,7 @@ def finding_groups(kind, found):
     {path: (when, line)}, grouped by the folder each is in, cut to its first
     three levels, the largest group first. Reds are grouped by the day first
     seen as well, which tells one event from another; ambers leave the
-    window after a week, so one folder is one item. The ID is only a name
-    for the group: an acknowledgement holds each file's state."""
+    window after a week, so one folder is one item."""
     groups = {}
     for path, (when, line) in found.items():
         # Files removed that no package listed are one event a day: an
@@ -2398,13 +2426,28 @@ def finding_groups(kind, found):
     out = []
     for (folder, day), entries in groups.items():
         entries.sort()
-        out.append((group_id(kind, folder, day.isoformat() if day else ""), folder,
-                    entries[0][0], entries))
+        gid = group_id(kind, folder, day.isoformat() if day else "", [e[1] for e in entries])
+        out.append((gid, folder, entries[0][0], entries))
     out.sort(key=lambda g: (-len(g[3]), g[1]))
     return out
 
 
-REMOVED_UNLISTED = "unpackaged file removed"
+# Folders where a change can give someone root or code that runs at boot or
+# login. `--ack amber` leaves out any item with a file in one of these, so
+# each needs its own ID.
+SENSITIVE = ("/etc/sudoers", "/etc/pam.d", "/etc/security", "/etc/systemd", "/usr/lib/systemd",
+             "/etc/pacman", "/etc/polkit-1", "/usr/share/polkit-1", "/etc/modprobe.d",
+             "/etc/modules-load.d", "/etc/profile", "/etc/environment", "/etc/ld.so",
+             "/etc/ssh", "/etc/udev", "/etc/cron", "/etc/xdg/autostart", "/etc/passwd",
+             "/etc/shadow", "/etc/group", "/etc/gshadow", "/etc/hosts", "/etc/nsswitch.conf",
+             "/etc/shells", "/etc/mkinitcpio", "/etc/default", "/etc/kernel", "/root",
+             "/usr/local/bin", "/usr/local/sbin", "/usr/local/lib", "/boot", "/etc/security-scan")
+
+
+def sensitive(path):
+    return path.startswith(SENSITIVE)
+
+
 # Every AIDE group the last integrity() call reported, {id: [path]}, for
 # --ack, and the logs that hold an open red, for --keep-logs.
 FOUND_GROUPS = {}
@@ -2422,6 +2465,7 @@ def integrity(now, since):
     if not recent:
         s.rating, s.headline = AMBER, "No AIDE result yet."
         return s
+    # Every time each path was logged, as (when, line, log), by grade.
     reds, ambers, pkg = {}, {}, 0
     links = listed_links()
     runs, _ = logs("aide", dt.datetime.min)
@@ -2431,20 +2475,16 @@ def integrity(now, since):
     FOUND_GROUPS.clear()
     AMBER_GROUPS.clear()
     OPEN_RED_LOGS.clear()
-    red_log = {}
 
-    def first(found, when, line, p=None):
-        path = line.split(" ", 2)[1] if line.count(" ") >= 2 else line
-        if path not in found or when < found[path][0]:
-            found[path] = (when, line)
-            if p is not None:
-                red_log[path] = p
+    def seen(found, when, line, p):
+        path = line_path(line)
+        if path:
+            found.setdefault(path, []).append((when, line, p))
     # One pacman call for the owners of every red file in logs from before
     # these rules, which are the ones re-checked below.
-    prefetch_owners(re.findall(r"^RED (?:added|changed) (\S+) ", "".join(
-        t for t in (read(p) for _, p in runs)
-        if not (RULES_LINE.search(t) and int(RULES_LINE.search(t).group(1)) >= RULES_VERSION)),
-        re.M))
+    prefetch_owners([line_path(l[4:]) or "" for t in (read(p) for _, p in runs)
+                     if not (RULES_LINE.search(t) and int(RULES_LINE.search(t).group(1)) >= RULES_VERSION)
+                     for l in t.splitlines() if l.startswith("RED ")])
     # Reds are read from every log kept, so one does not age out unseen;
     # ambers and the package count from the window only.
     for when, p in runs:
@@ -2478,9 +2518,9 @@ def integrity(now, since):
                     pkg += recent_run
                 elif grade == MAYBE:
                     if recent_run:
-                        first(ambers, when, line[4:])
+                        seen(ambers, when, line[4:], p)
                 else:
-                    first(reds, when, line[4:], p)
+                    seen(reds, when, line[4:], p)
             elif not recent_run:
                 continue
             elif line.startswith("AMBER "):
@@ -2492,58 +2532,73 @@ def integrity(now, since):
                 if m and old_kernels[m.group(1)]:
                     pkg += 1
                     continue
-                first(ambers, when, line[6:])
+                seen(ambers, when, line[6:], p)
             elif line.startswith("PKG "):
                 # The scan logs a removed kernel's modules as one line that
                 # counts them.
                 m = re.match(r"PKG removed /usr/lib/modules/\S+ \((\d+) entries, ", line)
                 pkg += int(m.group(1)) if m else 1
+    # An acknowledgement covers the lines logged before it while the file is
+    # as it recorded. A line logged after it is a new finding, dated by the
+    # first such line.
     acks = load_acks()
-    acked = acked_paths(acks)
-    reds = {k: v for k, v in reds.items() if not is_acked(k, acked)}
-    ambers = {k: v for k, v in ambers.items() if k not in reds and not is_acked(k, acked)}
-    OPEN_RED_LOGS.update(red_log[k] for k in reds)
-    red_groups = finding_groups(RED, reds)
-    for gid, folder, seen, entries in red_groups:
+    states = {}
+
+    def still_open(found):
+        out = {}
+        for path, times in found.items():
+            until = acked_until(path, acks, states)
+            later = sorted(t for t in times if until is None or t[0] > until)
+            if later:
+                out[path] = later
+        return out
+    open_reds = still_open(reds)
+    open_ambers = {k: v for k, v in still_open(ambers).items() if k not in open_reds}
+    for times in open_reds.values():
+        OPEN_RED_LOGS.update(p for _, _, p in times)
+    red_groups = finding_groups(RED, {k: v[0][:2] for k, v in open_reds.items()})
+    for gid, folder, first, entries in red_groups:
         FOUND_GROUPS[gid] = [path for _, path, _ in entries]
         if len(entries) == 1:
             what = entries[0][2]
         else:
-            what = f"{len(entries)} unexplained changes under {folder}"
+            folders = len({os.path.dirname(path) for _, path, _ in entries})
+            what = f"{len(entries)} unexplained changes in {folders} folder(s) under {folder}"
         s.add(RED, what,
-              f"Item {gid}, first seen {seen:%a %d %b}."
+              f"Item {gid}, first seen {first:%a %d %b}."
               + (f" For example: {entries[0][2]}" if len(entries) > 1 else ""),
               "A system file changed outside any package update. Compare with pacman -Qkk, "
               "and if it cannot be explained treat the machine as compromised. " + ack_hint(gid))
     # Amber changes are mostly your own edits or an update doing something no
-    # rule knows; grouped by folder and day, a week of work reads as a few lines.
-    amber_groups = finding_groups(AMBER, ambers)
-    for gid, folder, seen, entries in amber_groups:
+    # rule knows; grouped by folder, a week of work reads as a few lines.
+    amber_groups = finding_groups(AMBER, {k: v[0][:2] for k, v in open_ambers.items()})
+    for gid, folder, first, entries in amber_groups:
         FOUND_GROUPS[gid] = [path for _, path, _ in entries]
-        AMBER_GROUPS.add(gid)
+        if not any(sensitive(path) for _, path, _ in entries):
+            AMBER_GROUPS.add(gid)
         example = (entries[0][2] if len(entries) == 1
                    else f"{len(entries)} files, e.g. {entries[0][2]}")
         s.add(AMBER, (f"{len(entries)} file(s) removed that no package listed at the last check"
                       if folder == REMOVED_UNLISTED else f"Changed outside a package: {folder}"),
-              f"Item {gid}, first seen {seen:%a %d %b}. {example}",
+              f"Item {gid}, first seen {first:%a %d %b}. {example}",
               "Confirm these were your own changes (installs, config edits) or a package "
               "update. " + ack_hint(gid))
     # Every acknowledgement is listed, so one you did not make shows.
-    for a in sorted(acks, key=lambda a: str(a.get("when", ""))):
+    for a in sorted(acks, key=_ack_when):
         s.add(GREEN, f"Acknowledged {a.get('id', '?')}: {a.get('reason', '')}",
-              f"{len(a['paths'])} file(s), {str(a.get('when', '?'))[:16].replace('T', ' ')}"
-              f" by {a.get('by', '?')}")
+              f"{len(a['paths'])} file(s), {_ack_when(a):%a %d %b %H:%M} by {a.get('by', '?')}")
+    on_record = f" {len(acks)} acknowledgement(s) on record." if acks else ""
     runs_n = len(recent)
     if red_groups:
         s.headline = (f"{len(red_groups)} item(s) of unexplained changes to system files "
-                      f"({len(reds)} file(s)).")
+                      f"({len(open_reds)} file(s)).{on_record}")
     elif amber_groups:
         s.headline = (f"{runs_n} check(s) ran. No unexplained changes. {len(amber_groups)} "
-                      f"item(s) to confirm ({len(ambers)} file(s)); {pkg} came from package "
-                      "updates.")
+                      f"item(s) to confirm ({len(open_ambers)} file(s)); {pkg} came from package "
+                      f"updates.{on_record}")
     else:
         s.headline = (f"{runs_n} check(s) ran. Nothing changed except through package updates "
-                      f"({pkg} files).")
+                      f"({pkg} files).{on_record}")
     return s
 
 def rootkit(now, since):
@@ -3154,8 +3209,9 @@ def acknowledge(ids, reason, unack, now, since):
         print("security-report: say what was checked: --reason \"...\"", file=sys.stderr)
         return 2
     integrity(now, since)
-    # "amber" stands for every open amber item: a first check after an
-    # upgrade can list many folders of files the upgrade removed. Reds are
+    # "amber" stands for every open amber item with no file in a sensitive
+    # folder: a first check after an upgrade can list many folders of files
+    # the upgrade removed. Reds, and ambers in sensitive folders, are
     # acknowledged one by one.
     if "amber" in ids:
         ids = [i for i in ids if i != "amber"] + sorted(AMBER_GROUPS)
@@ -3167,6 +3223,15 @@ def acknowledge(ids, reason, unack, now, since):
     by = os.environ.get("SUDO_USER") or "root"
     for i in ids:
         paths = {path: file_state(path) for path in FOUND_GROUPS[i]}
+        # What the acknowledgement covers, by folder, so nothing unexpected
+        # rides along with the files that were checked.
+        folders = {}
+        for path in paths:
+            folders[os.path.dirname(path)] = folders.get(os.path.dirname(path), 0) + 1
+        for folder, n in sorted(folders.items(), key=lambda kv: -kv[1])[:15]:
+            print(f"  {i}: {n:>6} in {plain(folder)}")
+        if len(folders) > 15:
+            print(f"  {i}: and {len(folders) - 15} more folder(s)")
         acks.append({"id": i, "when": now.isoformat(), "by": by, "reason": plain(reason.strip()),
                      "paths": paths})
         subprocess.run(["logger", "-t", "security-report",
