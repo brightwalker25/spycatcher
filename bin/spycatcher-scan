@@ -342,12 +342,9 @@ lynis)
     log "summary: hardening index ${index:-?}, ${warnings} warning(s), ${suggestions} suggestion(s)"
     log ""
     log "--- warnings ---"
+    # No notification: lynis warnings are hardening advice, not signs of
+    # intrusion, and the report lists them without grading them.
     grep '^warning\[\]=' "$report" 2>/dev/null | log_tool
-
-    if [ "${warnings:-0}" -gt 0 ]; then
-      notify normal "Lynis: ${warnings} warning(s)" \
-        "Hardening index ${index:-?}/100. See ${LOG}"
-    fi
   else
     log "lynis produced no report at ${report}"
   fi

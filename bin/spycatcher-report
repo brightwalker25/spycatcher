@@ -2717,10 +2717,13 @@ def secrets(now, since, reg):
 
 
 def hardening(now, since):
+    # lynis is advice on how the machine could be set up, not a sign that
+    # anyone has been in it, so its warnings are listed but never graded.
+    # A missing or overdue audit is the scan health section's call.
     s = Section("System hardening (lynis, monthly)", GREEN, "")
     _, latest = logs("lynis", dt.datetime.min)
     if not latest:
-        s.rating, s.headline = AMBER, "No lynis audit yet."
+        s.rating, s.headline = GREY, "No lynis audit yet."
         return s
     text = read(latest[1])
     m = re.match(r"hardening index (\d+)", summary(text) or "")
@@ -2732,10 +2735,12 @@ def hardening(now, since):
         if wid == "PKGS-7322":
             s.add(GREEN, f"{msg} ({wid})", "", "Covered by the package section above.")
         else:
-            s.add(AMBER, f"{msg} ({wid})", "", f"Run: sudo lynis show details {wid}")
+            s.add(GREEN, f"{msg} ({wid})", "Hardening advice, not a sign of intrusion.",
+                  f"Optional. Run: sudo lynis show details {wid}")
     s.headline = (f"Hardening score {index}/100 on {latest[0]:%d %b}. "
                   "A score in the high 60s is typical for a desktop; the suggestions are mostly "
-                  "server hardening.") if index is not None else "No score recorded."
+                  "server hardening. Shown for information, not graded.") if index is not None \
+        else "No score recorded."
     return s
 
 

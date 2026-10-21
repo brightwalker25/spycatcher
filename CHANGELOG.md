@@ -6,6 +6,18 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-10-21
+
+### Changed
+
+- lynis warnings no longer turn the report amber. They are advice on how the
+  machine could be set up, not signs that anyone has been in it, so the
+  hardening section lists them in green for information. A clock that had
+  not synchronised recently (TIME-3185) was the case. A missing audit shows
+  grey there; a missing or overdue audit is still graded in the scan
+  schedule section.
+- The monthly lynis scan no longer sends a notification for its warnings.
+
 ## [0.4.1] - 2026-10-21
 
 ### Fixed

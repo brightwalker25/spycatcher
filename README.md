@@ -546,7 +546,7 @@ login.
 
 Each scan also sends its own notification as it finishes when it finds
 something: vulnerable packages, secrets in a repository, unexplained file
-changes, rootkit warnings, lynis warnings, a dangerous or suspicious model
+changes, rootkit warnings, a dangerous or suspicious model
 file, or a failed AIDE or model scan. Packages with a fix waiting, secrets,
 unexplained changes, rootkit warnings and dangerous model files are sent as
 critical. The
@@ -611,8 +611,11 @@ rkhunter's check of hidden and odd files is the only cover for that here.
 
 lynis is written with servers in mind. A score in the high 60s is typical for a
 desktop, and most of its suggestions are server hardening. Its warnings are
-shown as amber, except for the one it raises whenever arch-audit reports
-anything, which the package section already grades properly.
+advice on how the machine could be set up, not signs that anyone has been in
+it, so the report lists them in green for information and never grades on
+them. The one it raises whenever arch-audit reports anything is marked as
+covered by the package section. An audit that is missing or overdue is
+graded in the scan schedule section, like every other scan.
 
 ## Tests
 
