@@ -8,6 +8,13 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [0.5.1] - 2026-10-22
 
+### Added
+
+- The README suggests a way to share CVE assessments between several
+  machines: the register's `[cve.*]` entries kept in a private repository
+  of your own, with acknowledgements and machine-specific entries left on
+  each machine.
+
 ### Fixed
 
 - `/usr/lib/jvm/default` and `/usr/lib/jvm/default-runtime` were red after

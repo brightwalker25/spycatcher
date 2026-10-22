@@ -44,6 +44,27 @@ and changes the plugin id in `~/.config/omarchy/shell.json`, keeping the
 widget's settings. Check it first with `--dry-run`, then restart the shell.
 [INSTALL.md](INSTALL.md#moving-from-security-scan) describes each step.
 
+## Several machines
+
+With the same packages on more than one machine, each machine's risk
+register needs the same CVE assessments. One way to assess each finding
+once is to keep the `[cve.*]` entries in a private repository of your own
+that every machine pulls, and copy across the entries a machine lacks or
+holds an older assessment of, compared by their `assessed` date. Keep that
+repository private: it records what you run and how you handle each
+exposure.
+
+Some things should stay on each machine. Secrets and standing entries name
+that machine's own paths and checks. Acknowledgements record that one
+machine's files were checked, which says nothing about another machine.
+Write to `/etc/spycatcher/risk-register.toml` only with sudo: the register
+is root's so that nothing running as the desktop user can lower a rating.
+Spycatcher then lists the register as changed until you acknowledge it.
+
+The same repository is a good place for real signs of intrusion seen on one
+machine, such as a host it contacted or a file it should not have, so that
+the others can be checked for them.
+
 ## Removing
 
 ```bash
