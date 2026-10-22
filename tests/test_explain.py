@@ -748,14 +748,47 @@ class MountModes(Files):
             "1 0 0:1 / / rw - ext4 /dev/root rw\n"
             f"26 1 259:3 / {self.boot} rw,relatime - {fstype} /dev/nvme0n1p3 {opts}\n" + extra)
 
-    def explains(self, owner="amd-ucode"):
+    def explains(self, owner="amd-ucode", logged=False, entry=None):
         done = subprocess.CompletedProcess([], 0, stdout=self.qkk, stderr="")
-        with mock.patch.object(self.r, "MOUNTINFO", str(self.info)), \
-             mock.patch.object(self.r.os, "lstat", return_value=self.st), \
+        lstat = (mock.patch.object(self.r.os, "lstat", side_effect=PermissionError)
+                 if self.st is None else mock.patch.object(self.r.os, "lstat", return_value=self.st))
+        with mock.patch.object(self.r, "MOUNTINFO", str(self.info)), lstat, \
              mock.patch.object(self.r, "_owner_of", return_value="amd-ucode"), \
              mock.patch.object(self.r, "_packaged", return_value=self.packaged), \
-             mock.patch.object(self.r.subprocess, "run", return_value=done):
-            return self.r.mount_mode_explains(self.path, owner)
+             mock.patch.object(self.r, "_pacman", return_value="amd-ucode 20260916-1\n"), \
+             mock.patch.object(self.r, "_mtree_entry",
+                               return_value=entry if entry is not None else {"type": "file"}), \
+             mock.patch.object(self.r.subprocess, "run", return_value=done) as run:
+            got = self.r.mount_mode_explains(self.path, owner, logged)
+            self.ran = run.called
+            return got
+
+    def test_a_file_the_user_may_not_look_at_is_judged_by_the_mount(self):
+        # The report runs as the desktop user, who cannot look into a FAT
+        # /boot with dmask=0077; the scan logged only a mode mismatch.
+        self.st = None
+        self.assertEqual(self.explains(logged=True), "amd-ucode")
+        self.assertFalse(self.ran)
+
+    def test_unless_the_scan_logged_it_so(self):
+        self.st = None
+        self.assertIsNone(self.explains())
+
+    def test_an_unsafe_mount_stays_red_unseen(self):
+        self.st = None
+        self.mount("vfat", "rw,umask=0000")
+        self.assertIsNone(self.explains(logged=True))
+        self.mount("vfat", "rw,fmask=0077,uid=1000")
+        self.assertIsNone(self.explains(logged=True))
+
+    def test_a_folder_or_unlisted_path_stays_red_unseen(self):
+        self.st = None
+        self.assertIsNone(self.explains(logged=True, entry={"type": "dir"}))
+        self.assertIsNone(self.explains(logged=True, entry=False))
+
+    def test_another_owner_unseen(self):
+        self.st = None
+        self.assertIsNone(self.explains(owner="other", logged=True))
 
     def test_mode_the_mount_gives_every_file(self):
         self.assertEqual(self.explains(), "amd-ucode")
@@ -815,6 +848,28 @@ class MountModes(Files):
             self.assertEqual(self.r.unpackaged_explains(line, {}, "", later, later), "PKG")
             self.assertIsNone(self.r.unpackaged_explains(line, {}, "", later, later, current=True))
 
+    def test_old_red_line_re_graded_where_the_user_may_not_look(self):
+        # recheck() cannot tell when the file last changed; a later change
+        # is logged again by the scan.
+        line = f"changed {self.path} (owned by amd-ucode but fails pacman's ownership or permission check)"
+        when = dt.datetime.now() - dt.timedelta(days=1)
+        with mock.patch.object(self.r, "unchanged_since", return_value=False), \
+             mock.patch.object(self.r, "_unreadable", return_value=True), \
+             mock.patch.object(self.r, "mount_mode_explains", return_value="amd-ucode") as mme:
+            self.assertEqual(self.r.recheck(line, {}, "", when, when, False), "PKG")
+            self.assertEqual(mme.call_args.kwargs, {"logged": True})
+            self.assertIsNone(self.r.recheck(line, {}, "", when, when, True))
+        with mock.patch.object(self.r, "unchanged_since", return_value=False), \
+             mock.patch.object(self.r, "_unreadable", return_value=False), \
+             mock.patch.object(self.r, "mount_mode_explains", return_value="amd-ucode"):
+            # A file the user can see that changed since stays red.
+            self.assertIsNone(self.r.recheck(line, {}, "", when, when, False))
+        other = f"changed {self.path} (owned by amd-ucode but fails pacman's checksum)"
+        with mock.patch.object(self.r, "unchanged_since", return_value=False), \
+             mock.patch.object(self.r, "_unreadable", return_value=True), \
+             mock.patch.object(self.r, "mount_mode_explains", return_value="amd-ucode"):
+            self.assertIsNone(self.r.recheck(other, {}, "", when, when, False))
+
 
 class ConfigModeTightened(Files):
     """cupsd rewrites printers.conf 0600 root:cups; the package ships it 0644
@@ -856,9 +911,35 @@ class ConfigModeTightened(Files):
         self.backup = {"/etc/cups/cupsd.conf"}
         self.assertEqual(self.grade(fake_stat(0o600, gid=209)), [])
 
+    def test_unreadable_content_only_for_a_line_the_scan_logged(self):
+        # pacman run by the desktop user cannot read a 0600 file.
+        self.qkk += f"warning: cups: {self.path} (failed to calculate SHA256 checksum)\n"
+        self.assertEqual(self.grade(fake_stat(0o600, gid=209)), [])
+        done = subprocess.CompletedProcess([], 0, stdout=self.qkk, stderr="")
+        with mock.patch.object(self.r.os, "lstat", return_value=fake_stat(0o600, gid=209)), \
+             mock.patch.object(self.r, "_owner_of", return_value="cups"), \
+             mock.patch.object(self.r, "_backup_files", return_value=self.backup), \
+             mock.patch.object(self.r, "_packaged", return_value=(0o644, 0, 209)), \
+             mock.patch.object(self.r.subprocess, "run", return_value=done):
+            self.assertEqual(self.r.config_mode_tightened(self.path, "cups", logged=True), "cups")
+
     def test_content_changed_as_well_is_not_this_rule(self):
         self.qkk += f"backup file: cups: {self.path} (SHA256 checksum mismatch)\n"
         self.assertEqual(self.grade(fake_stat(0o600, gid=209)), [])
+
+    def test_old_red_lines_are_re_graded_amber(self):
+        # Before 0.2.12 the scan logged these red; the report re-checks them.
+        later = dt.datetime.now() + dt.timedelta(minutes=1)
+        line = f"changed {self.path} (owned by cups but fails pacman's ownership or permission check)"
+        with mock.patch.object(self.r, "unchanged_since", return_value=True), \
+             mock.patch.object(self.r, "mount_mode_explains", return_value=None), \
+             mock.patch.object(self.r, "config_mode_tightened", return_value="cups"):
+            self.assertEqual(self.r.unpackaged_explains(line, {}, "", later, later), "AMBER")
+            self.assertIsNone(self.r.unpackaged_explains(line, {}, "", later, later, current=True))
+        with mock.patch.object(self.r, "unchanged_since", return_value=True), \
+             mock.patch.object(self.r, "mount_mode_explains", return_value=None), \
+             mock.patch.object(self.r, "config_mode_tightened", return_value=None):
+            self.assertIsNone(self.r.unpackaged_explains(line, {}, "", later, later))
 
     def test_backup_list_is_read_from_the_local_database(self):
         files = ("%FILES%\netc/\netc/cups/printers.conf\n\n"
@@ -909,6 +990,15 @@ class RebuiltCaches(Files):
 
     def test_other_paths(self):
         self.assertIsNone(self.r.rebuilt_by_hook("/usr/lib/other.cache"))
+
+    def test_graphviz_plugin_list(self):
+        real = self.make("config8", "list")
+        with mock.patch.object(self.r.os, "lstat", return_value=os.lstat(real)), \
+             mock.patch.object(self.r, "Path", side_effect=lambda p: Path(real)), \
+             mock.patch.object(self.r, "_cache_now", return_value=b"list"):
+            self.assertEqual(self.r.rebuilt_by_hook("/usr/lib/graphviz/config8"), "dot -c")
+            self.assertIsNone(self.r.rebuilt_by_hook("/usr/lib/graphviz/config8.bak"))
+            self.assertIsNone(self.r.rebuilt_by_hook("/usr/lib/graphviz/libgvplugin_core.so.8"))
 
 
 class CacheNow(unittest.TestCase):
@@ -989,6 +1079,57 @@ class CacheNow(unittest.TestCase):
         self.assertEqual(seen["cmd"][0], "/usr/bin/systemd-hwdb")
         self.assertEqual(seen["cmd"][2:], ["--usr", "update"])
         self.assertFalse(seen["root"].startswith("/usr"))
+
+    def test_graphviz_list_built_in_a_temporary_plugin_folder(self):
+        # As graphviz's install script runs it, but into GVBINDIR, with
+        # links to the plugins there and nothing else.
+        r = load_report()
+        seen = {}
+
+        def links(src, tmp, keep):
+            seen["src"] = src
+            seen["kept"] = [n for n in ("libgvplugin_core.so.8", "config8", "config9", "config")
+                            if keep(n)]
+
+        def run(cmd, **kw):
+            seen["cmd"], seen["env"] = cmd, kw.get("env")
+            Path(kw["env"]["GVBINDIR"], "config8").write_bytes(b"plugins")
+            return subprocess.CompletedProcess(cmd, 0, b"", b"")
+        with mock.patch.object(r, "_links_to", side_effect=links), \
+             mock.patch.object(r.subprocess, "run", side_effect=run):
+            self.assertEqual(r._cache_now("/usr/lib/graphviz/config8"), b"plugins")
+        self.assertEqual(seen["src"], "/usr/lib/graphviz")
+        self.assertEqual(seen["kept"], ["libgvplugin_core.so.8"])
+        self.assertEqual(seen["cmd"], ["/usr/bin/dot", "-c"])
+        self.assertFalse(seen["env"]["GVBINDIR"].startswith("/usr"))
+        self.assertEqual({k: v for k, v in seen["env"].items() if k != "GVBINDIR"}, r.SAFE_ENV)
+
+    def test_a_module_pacman_does_not_verify_stops_the_rebuild(self):
+        # Review of 0.4.4: dot -c and gio-querymodules load every module
+        # they are given, as root in the scan, so a planted one must not run.
+        r = load_report()
+        with tempfile.TemporaryDirectory() as d:
+            for name in ("libgvplugin_core.so.8", "libgvplugin_planted.so.8"):
+                Path(d, name).write_bytes(b"")
+            owners = {f"{d}/libgvplugin_core.so.8": "graphviz"}
+            for verifies in (True, False):
+                with tempfile.TemporaryDirectory() as tmp, \
+                     mock.patch.object(r, "_owner_of", side_effect=lambda p: owners.get(p, "")), \
+                     mock.patch.object(r, "_pacman_verifies", return_value=verifies):
+                    with self.assertRaises(OSError):
+                        r._links_to(d, tmp, lambda n: n.startswith("libgvplugin_"))
+                    self.assertEqual(os.listdir(tmp), [])
+            owners[f"{d}/libgvplugin_planted.so.8"] = "graphviz"
+            with tempfile.TemporaryDirectory() as tmp, \
+                 mock.patch.object(r, "_owner_of", side_effect=lambda p: owners.get(p, "")), \
+                 mock.patch.object(r, "_pacman_verifies", return_value=True):
+                r._links_to(d, tmp, lambda n: n.startswith("libgvplugin_"))
+                self.assertEqual(len(os.listdir(tmp)), 2)
+        with mock.patch.object(r, "_links_to", side_effect=OSError("planted")), \
+             mock.patch.object(r.subprocess, "run") as run:
+            self.assertIsNone(r._cache_now("/usr/lib/graphviz/config8"))
+            self.assertIsNone(r._cache_now("/usr/lib/gio/modules/giomodule.cache"))
+            run.assert_not_called()
 
     def test_immodules_extra_new_line_is_dropped(self):
         r = load_report()

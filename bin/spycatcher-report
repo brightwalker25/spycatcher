@@ -1684,7 +1684,7 @@ def _packaged(owner, path):
         return None
 
 
-def mount_mode_explains(path, owner):
+def mount_mode_explains(path, owner, logged=False):
     """The package of a file on a file system without Unix modes (FAT, exFAT,
     NTFS) whose only faults are a mode, owner or group that the mount gives
     every file, or None. /boot is often FAT with fmask=0077, so each packaged
@@ -1696,36 +1696,56 @@ def mount_mode_explains(path, owner):
     or the packaged group, writable by no group or other, and with no
     permission the package does not give, apart from the execute bits FAT
     gives every file. A mount that hands the files to a user, or makes them
-    writable by others, stays red."""
+    writable by others, stays red.
+
+    `logged` is for a line the scan logged as root, which says pacman found
+    nothing wrong with the file but its mode or group. The desktop user may
+    not look into a FAT /boot (dmask=0077), but there every file has the
+    mode and owner the mount gives, so a regular file the package lists
+    that the user cannot look at is judged from the mount options alone,
+    and pacman, which could not read it, is not asked again. The mount
+    options are read now, not as they were when the line was logged, and a
+    root read error on such a file in a scan before 0.2.12 could have been
+    logged as a mode mismatch too; a change to the file since is logged again
+    by the scan."""
     mount = _mount_of(path)
     if not mount or mount[1] not in NO_UNIX_MODES:
         return None
+    opts = mount[2]
     try:
         st = os.lstat(path)
+        kind = "dir" if stat.S_ISDIR(st.st_mode) else "file" if stat.S_ISREG(st.st_mode) else None
+    except PermissionError:
+        st, kind = None, "file"
     except OSError:
         return None
-    opts = mount[2]
-    if stat.S_ISDIR(st.st_mode):
-        mask = opts.get("dmask", opts.get("umask", "022"))
-    elif stat.S_ISREG(st.st_mode):
-        mask = opts.get("fmask", opts.get("umask", "022"))
-    else:
+    if kind is None:
         return None
+    mask = opts.get("dmask" if kind == "dir" else "fmask", opts.get("umask", "022"))
     try:
         want_mode = 0o777 & ~int(mask, 8)
         want_uid, want_gid = int(opts.get("uid", "0")), int(opts.get("gid", "0"))
     except ValueError:
         return None
-    mode = stat.S_IMODE(st.st_mode)
-    if (mode != want_mode or st.st_uid != want_uid or st.st_gid != want_gid
+    if st is None:
+        version = (_pacman("-Q", "--", owner) or "").split()
+        entry = _mtree_entry(owner, version[1], path) if len(version) == 2 else None
+        if not logged or not entry or entry.get("type", "file") != "file":
+            return None
+        mode, uid, gid = want_mode, want_uid, want_gid
+    else:
+        mode, uid, gid = stat.S_IMODE(st.st_mode), st.st_uid, st.st_gid
+    if (mode != want_mode or uid != want_uid or gid != want_gid
             or _owner_of(path) != owner):
         return None
     packaged = _packaged(owner, path)
     if packaged is None:
         return None
-    if (st.st_uid != 0 or st.st_gid not in (0, packaged[2]) or mode & 0o022
+    if (uid != 0 or gid not in (0, packaged[2]) or mode & 0o022
             or mode & ~(packaged[0] | 0o111) & 0o7777):
         return None
+    if st is None:
+        return owner
     said = _qkk_said(owner, path)
     ok = re.compile(r"\((?:Permissions|UID|GID|Modification time) mismatch\)$")
     if said is None or not all(ok.search(l) for l in said):
@@ -1748,7 +1768,7 @@ def _backup_files(owner):
     return {"/" + line.split("\t")[0] for line in m.group(1).splitlines()} if m else set()
 
 
-def config_mode_tightened(path, owner):
+def config_mode_tightened(path, owner, logged=False):
     """The package of a configuration file it keeps across upgrades (a backup
     file) whose only faults are a mode that only takes permissions away from
     the packaged one and, maybe, another group, or None. cupsd rewrites
@@ -1757,7 +1777,15 @@ def config_mode_tightened(path, owner):
     another owner, stays red. Graded amber, like an edited configuration
     file. pacman 7 marks only a backup file's content, size and time
     messages "backup file:"; a mode or group mismatch is a plain "warning:",
-    so the backup list comes from pacman's database."""
+    so the backup list comes from pacman's database.
+
+    `logged` is for a red line the scan logged as root, which says pacman
+    reported a mode or group mismatch, for a file unchanged since. pacman run
+    by the desktop user cannot read a 0600 file to check its content, so that
+    failure is allowed then. Limit: scans before 0.2.12 dropped pacman 7's
+    "backup file:" content messages, so such a line does not prove the
+    content was as packaged. A size change still shows and stays red; an
+    edit of the same size is amber, as an edited configuration file is."""
     try:
         st = os.lstat(path)
     except OSError:
@@ -1770,7 +1798,9 @@ def config_mode_tightened(path, owner):
     if packaged is None or stat.S_IMODE(st.st_mode) & ~packaged[0] & 0o7777:
         return None
     said = _qkk_said(owner, path)
-    ok = re.compile(r"^(?:warning|backup file): .*\((?:Permissions|GID|Modification time) mismatch\)$")
+    unread = r"|failed to calculate \S+ checksum" if logged else ""
+    ok = re.compile(r"^(?:warning|backup file): .*\((?:(?:Permissions|GID|Modification time) mismatch"
+                    + unread + r")\)$")
     if not said or not all(ok.search(l) for l in said):
         return None
     return owner
@@ -1781,14 +1811,25 @@ def config_mode_tightened(path, owner):
 # tool builds now, run as this user into a temporary folder.
 # GIO's own module cache and GTK 4's.
 GIO_CACHE = re.compile(r"/usr/lib/gio/modules/giomodule\.cache|/usr/lib/gtk-4\.0/4\.0\.0/[^/]+/giomodule\.cache")
+# graphviz's plugin list, config8 in graphviz 2.30 and later, which its
+# install script removes and has `dot -c` write again on every upgrade.
+GRAPHVIZ_CONFIG = re.compile(r"/usr/lib/graphviz/config[0-9]+")
 
 
 def _links_to(src, tmp, keep):
     """Links in `tmp` to every entry of folder `src` for which `keep` is
-    true."""
-    for name in os.listdir(src):
-        if keep(name):
-            os.symlink(os.path.join(src, name), os.path.join(tmp, name))
+    true. Each must be a package's file that pacman verifies, else OSError:
+    the tools that rebuild a module cache load every module they are given,
+    and the scan runs them as root, so a module planted there would run
+    before its own change is graded."""
+    names = [n for n in os.listdir(src) if keep(n)]
+    for name in names:
+        path = os.path.join(src, name)
+        owner = _owner_of(path)
+        if not owner or not _pacman_verifies(owner, path):
+            raise OSError(f"{path} is not a package file pacman verifies")
+    for name in names:
+        os.symlink(os.path.join(src, name), os.path.join(tmp, name))
 
 
 def _cache_now(path):
@@ -1834,6 +1875,14 @@ def _cache_now(path):
                 _links_to(os.path.dirname(path), tmp, lambda n: n.endswith(".so"))
                 if run_([_tool("gio-querymodules"), tmp]).returncode == 0:
                     return Path(tmp, "giomodule.cache").read_bytes()
+            elif GRAPHVIZ_CONFIG.fullmatch(path):
+                # dot -c writes the list into GVBINDIR, from the plugins it
+                # finds there, libgvplugin_*.
+                _links_to(os.path.dirname(path), tmp, lambda n: n.startswith("libgvplugin_"))
+                r = subprocess.run([_tool("dot"), "-c"], capture_output=True, timeout=120,
+                                   env={**_C_LOCALE, "GVBINDIR": tmp})
+                if r.returncode == 0:
+                    return Path(tmp, os.path.basename(path)).read_bytes()
     except (OSError, subprocess.SubprocessError):
         return None
     return None
@@ -1854,11 +1903,13 @@ REBUILT_BY = {
 def rebuilt_by_hook(path, log=None):
     """The tool that builds the cache at `path` (glibc's and lib32-glibc's gconv
     modules, systemd's hardware database, GTK 3
-    input methods, the desktop MIME cache, a GTK 4 GIO module cache), when
+    input methods, the desktop MIME cache, a GTK 4 GIO module cache,
+    graphviz's plugin list), when
     the file is a regular file and byte for byte what that tool builds now,
     or None. Their pacman hooks run those tools after every change to what
     the caches list. `log` is unused and kept for the callers."""
-    tool = REBUILT_BY.get(path) or ("gio-querymodules" if GIO_CACHE.fullmatch(path) else None)
+    tool = (REBUILT_BY.get(path) or ("gio-querymodules" if GIO_CACHE.fullmatch(path) else None)
+            or ("dot -c" if GRAPHVIZ_CONFIG.fullmatch(path) else None))
     if tool is None:
         return None
     try:
@@ -1951,6 +2002,17 @@ def owned_all_along(path, when):
     return bool(owner) and _pacman_verifies(owner, path)
 
 
+def _unreadable(path):
+    """True when whoever runs the report may not look at `path`."""
+    try:
+        os.lstat(path)
+    except PermissionError:
+        return True
+    except OSError:
+        pass
+    return False
+
+
 def unchanged_since(path, until):
     """True when `path` (or the symlink itself) last changed before `until`,
     the start of the run that logged it, so a re-check today looks at what
@@ -1987,7 +2049,9 @@ def unpackaged_explains(line, links, log, when=None, until=None, current=False):
         path, owner = m.groups()
         if current or until is None or not unchanged_since(path, until):
             return None
-        return PKG if mount_mode_explains(path, owner) else None
+        if mount_mode_explains(path, owner, logged=True):
+            return PKG
+        return MAYBE if config_mode_tightened(path, owner, logged=True) else None
     m = re.match(r"changed (.+) \(owned by (\S+) but fails pacman's checksum\)$", line)
     if m:
         path, owner = m.groups()
@@ -2287,10 +2351,11 @@ def boot_explained_by_pacman(when, path, runs, log=None):
 
 # spycatcher-scan logs "graded by spycatcher rules N" in each AIDE log, for
 # the version of the rules it graded with: 2 in 0.2.12, 3 since 0.2.13 added
-# dkms_built(), 4 since 0.3.0 added written_in_pacman_run(). Versions before
-# 0.4.0 wrote "graded by security-scan rules N", under the project's earlier
-# name, and those logs are still read.
-RULES_VERSION = 4
+# dkms_built(), 4 since 0.3.0 added written_in_pacman_run(), 5 since 0.4.4
+# rebuilds graphviz's plugin list with dot -c. Versions before 0.4.0 wrote
+# "graded by security-scan rules N", under the project's earlier name, and
+# those logs are still read.
+RULES_VERSION = 5
 RULES_LINE = re.compile(r"^graded by (?:spycatcher|security-scan) rules (\d+)$", re.M)
 
 
@@ -2298,7 +2363,17 @@ def recheck(line, links, log, when, until, current):
     """The grade a RED line earns now (PKG or AMBER), or None to keep it red.
     See unpackaged_explains() for the conditions."""
     path = line_path(line) or ""
-    if until is None or not path.startswith("/") or not unchanged_since(path, until):
+    if until is None or not path.startswith("/"):
+        return None
+    if not unchanged_since(path, until):
+        # The desktop user cannot look into a FAT /boot to tell; there the
+        # mount gives every file its mode, and pacman, as root, found
+        # nothing else wrong when the line was logged. A later change to the
+        # file is logged again.
+        m = re.match(r"(?:added|changed) (.+) \(owned by (\S+) but fails pacman's ownership or "
+                     r"permission check\)$", line)
+        if not current and m and _unreadable(path) and mount_mode_explains(*m.groups(), logged=True):
+            return PKG
         return None
     if listed_link_explains(line, links):
         return PKG

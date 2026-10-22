@@ -6,6 +6,40 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-10-22
+
+### Changed
+
+- graphviz's plugin list, `/usr/lib/graphviz/config8`, is a package change
+  when it is byte for byte what `dot -c` builds now from the plugins beside
+  it, like the other caches a pacman hook rebuilds. It was amber after every
+  graphviz install or upgrade, because graphviz's install script removes the
+  file and has `dot -c` write it again. The grading rules are now version 5,
+  so red lines logged with version 4 are re-checked.
+- A cache rebuilt from modules (graphviz's plugin list, GIO's and GTK 4's
+  module caches) is rebuilt only when every module its tool would load is
+  a package's file that pacman verifies. The tools load each module they
+  are given, and the scan runs them as root, so a module planted beside the
+  others could have run before its own change was graded.
+
+### Fixed
+
+- Two kinds of red line logged before 0.2.12 stayed red for good in the
+  bar, though the report run as root explained them, and so could not be
+  acknowledged either: root found nothing open. Both are lines where the
+  scan's pacman check, as root, reported a mode mismatch.
+  - A configuration file's tighter mode, such as cupsd's `printers.conf`
+    and `classes.conf` at 0600, is now re-checked with the rule the scan
+    uses, and is amber. pacman run by the desktop user cannot read such a
+    file, and that is allowed for these lines. Scans before 0.2.12 did not
+    check such a file's content, so an edit that kept its size is amber
+    too, as an edited configuration file always is; a size change stays
+    red.
+  - A package file on a FAT `/boot`, such as `amd-ucode.img`, which the
+    desktop user may not look at, is judged from the mount options, which
+    give every file there its mode, and is a package change when those are
+    safe.
+
 ## [0.4.3] - 2026-10-21
 
 ### Changed

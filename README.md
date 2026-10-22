@@ -321,8 +321,7 @@ explains each change before it is reported:
   operand of `touch`, `tee` or `truncate`, a file `sed -i` edits, or `dd`'s
   `of=`, written out or held in a variable the script gives one literal
   value. When the script only names the path, for example removing it before
-  another program writes it again (graphviz's plugin list), the file is
-  amber, to confirm. A package's own file must otherwise pass pacman's check
+  another program writes it again, the file is amber, to confirm. A package's own file must otherwise pass pacman's check
   apart from its content, and a link must point at a file of the same
   package that pacman verifies. The time used is the file's change time
   (ctime), which the kernel sets on every write and `touch` cannot set back,
@@ -374,22 +373,29 @@ explains each change before it is reported:
   group, writable by no group or other, and with no permission the package
   does not give apart from the execute bits FAT gives every file. A mount
   that hands the files to a user, or lets others write them, stays red. The
-  weekly report runs as the desktop user, who cannot read such a
-  `/boot`, so it cannot re-check a red line of this kind logged earlier.
+  weekly report runs as the desktop user, who cannot look into such a
+  `/boot`. For a red line of this kind logged earlier, where the scan's
+  pacman check found nothing but the mode, the report judges a file it
+  cannot look at from the mount options alone, since the mount gives every
+  file there its mode.
 - A cache that a pacman hook rebuilds (glibc's and lib32-glibc's
   `gconv-modules.cache`, systemd's `hwdb.bin`, the GTK 3 input method
-  cache, the desktop file MIME cache, GIO's and GTK 4's GIO module caches) is a package change when it is byte for byte what its tool
-  (`iconvconfig`, `systemd-hwdb`, `gtk-query-immodules-3.0`,
-  `update-desktop-database`,
-  `gio-querymodules`) builds now, run by its full path with a fixed
-  environment into a temporary folder. When it was
+  cache, the desktop file MIME cache, GIO's and GTK 4's GIO module caches,
+  graphviz's plugin list `config8`) is a package change when it is byte for
+  byte what its tool (`iconvconfig`, `systemd-hwdb`,
+  `gtk-query-immodules-3.0`, `update-desktop-database`, `gio-querymodules`,
+  `dot -c`) builds now, run by its full path with a fixed environment into
+  a temporary folder. When it was
   written does not count, since `touch` can set that.
 - A configuration file a package keeps across upgrades (pacman's backup
   list) whose only change is
   a tighter mode, and perhaps another group, while root still owns it, is
   amber, like an edited configuration file: cupsd rewrites `printers.conf`
   0600 `root:cups`. A permission the package does not give, or another
-  owner, stays red. Only the scan, which runs as root, can check this.
+  owner, stays red. The scan applies this as root. A red line of this kind
+  logged before 0.2.12, where the scan's pacman check found nothing but the
+  mode, is re-checked by the report too, for a file unchanged since; as the
+  desktop user, pacman cannot read the file, which is then allowed.
 - A browser's `policies.json` that a local pacman hook rewrites after every
   update, to switch telemetry and studies off, always fails pacman's checksum.
   It is not red while that hook is installed and the file holds only the
