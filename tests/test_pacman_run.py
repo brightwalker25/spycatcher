@@ -259,7 +259,7 @@ class RulesVersion(unittest.TestCase):
     def test_scan_and_report_agree(self):
         m = re.search(r'log "graded by spycatcher rules (\d+)"', SCAN.read_text())
         self.assertEqual(int(m.group(1)), load_report().RULES_VERSION)
-        self.assertEqual(load_report().RULES_VERSION, 5)
+        self.assertEqual(load_report().RULES_VERSION, 6)
 
 
 if __name__ == "__main__":

@@ -1942,6 +1942,41 @@ def rebuilt_by_hook(path, log=None):
     return tool if data is not None and data == _cache_now(path) else None
 
 
+# java-runtime-common ships these two links pointing nowhere useful, and
+# archlinux-java, which every JDK's install script runs, points them at the
+# default Java, so they fail pacman's link check on every machine with Java.
+JVM_DIR = "/usr/lib/jvm"
+JVM_DEFAULT_LINKS = {f"{JVM_DIR}/default", f"{JVM_DIR}/default-runtime"}
+_QKK_LINK_ONLY = re.compile(r"\(Symlink path mismatch\)$|\(Modification time mismatch\)$")
+
+
+def java_default_link(path, owner):
+    """The package of the Java that `path`, one of java-runtime-common's
+    default links, points at, or None. pacman must report nothing about the
+    link but its target and time, the target must be a folder directly in
+    /usr/lib/jvm, and that folder's bin/java a file of a package that pacman
+    verifies."""
+    if path not in JVM_DEFAULT_LINKS or owner != "java-runtime-common":
+        return None
+    said = _qkk_said(owner, path)
+    if not said or not all(_QKK_LINK_ONLY.search(l) for l in said):
+        return None
+    try:
+        if not stat.S_ISLNK(os.lstat(path).st_mode):
+            return None
+        target = os.readlink(path)
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", target):
+            return None
+        home = os.path.join(JVM_DIR, target)
+        if not stat.S_ISDIR(os.lstat(home).st_mode):
+            return None
+    except OSError:
+        return None
+    java = os.path.join(home, "bin/java")
+    pkg = _owner_of(java)
+    return pkg if pkg and _pacman_verifies(pkg, java) else None
+
+
 def explain_changes(records, conf, log):
     """For spycatcher-scan: the explanations above, for many files in one run.
     `records` are (owner, path) pairs; owner is "" for a file no package
@@ -1951,6 +1986,10 @@ def explain_changes(records, conf, log):
     links = listed_links(conf) if conf else {}
     for owner, path in records:
         if owner:
+            pkg = java_default_link(path, owner)
+            if pkg:
+                yield path, PKG, f"default Java link, set to {pkg} by archlinux-java"
+                continue
             pkg = config_mode_tightened(path, owner)
             if pkg:
                 yield path, MAYBE, f"config file of {pkg}, permissions changed locally"
@@ -2074,6 +2113,12 @@ def unpackaged_explains(line, links, log, when=None, until=None, current=False):
         if mount_mode_explains(path, owner, logged=True):
             return PKG
         return MAYBE if config_mode_tightened(path, owner, logged=True) else None
+    m = re.match(r"(?:added|changed) (.+) \(owned by (\S+) but fails pacman's checksum\)$", line)
+    if m and m.group(1) in JVM_DEFAULT_LINKS:
+        path, owner = m.groups()
+        if current or until is None or not unchanged_since(path, until):
+            return None
+        return PKG if java_default_link(path, owner) else None
     m = re.match(r"changed (.+) \(owned by (\S+) but fails pacman's checksum\)$", line)
     if m:
         path, owner = m.groups()
@@ -2374,10 +2419,11 @@ def boot_explained_by_pacman(when, path, runs, log=None):
 # spycatcher-scan logs "graded by spycatcher rules N" in each AIDE log, for
 # the version of the rules it graded with: 2 in 0.2.12, 3 since 0.2.13 added
 # dkms_built(), 4 since 0.3.0 added written_in_pacman_run(), 5 since 0.4.4
-# rebuilds graphviz's plugin list with dot -c. Versions before 0.4.0 wrote
+# rebuilds graphviz's plugin list with dot -c, 6 since 0.5.1 explains the
+# default Java links archlinux-java sets. Versions before 0.4.0 wrote
 # "graded by security-scan rules N", under the project's earlier name, and
 # those logs are still read.
-RULES_VERSION = 5
+RULES_VERSION = 6
 RULES_LINE = re.compile(r"^graded by (?:spycatcher|security-scan) rules (\d+)$", re.M)
 
 

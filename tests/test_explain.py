@@ -1001,6 +1001,66 @@ class RebuiltCaches(Files):
             self.assertIsNone(self.r.rebuilt_by_hook("/usr/lib/graphviz/libgvplugin_core.so.8"))
 
 
+class JavaDefaultLink(unittest.TestCase):
+    """archlinux-java points java-runtime-common's default links at the
+    default Java, so they fail pacman's link check after any JDK install."""
+
+    def setUp(self):
+        self.r = load_report()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.jvm = self.tmp.name
+        Path(self.jvm, "java-27-openjdk/bin").mkdir(parents=True)
+        Path(self.jvm, "java-27-openjdk/bin/java").write_bytes(b"")
+        self.link = f"{self.jvm}/default"
+        os.symlink("java-27-openjdk", self.link)
+        for name, value in (("JVM_DIR", self.jvm),
+                            ("JVM_DEFAULT_LINKS", {self.link, f"{self.jvm}/default-runtime"})):
+            patcher = mock.patch.object(self.r, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def check(self, path=None, owner="java-runtime-common", verifies=True,
+              said=("warning: java-runtime-common: {p} (Symlink path mismatch)",
+                    "warning: java-runtime-common: {p} (Modification time mismatch)")):
+        path = path or self.link
+        owners = {f"{self.jvm}/java-27-openjdk/bin/java": "jdk-openjdk"}
+        with mock.patch.object(self.r, "_qkk_said", return_value=[s.format(p=path) for s in said]), \
+             mock.patch.object(self.r, "_owner_of", side_effect=lambda f: owners.get(f, "")), \
+             mock.patch.object(self.r, "_pacman_verifies", return_value=verifies):
+            return self.r.java_default_link(path, owner)
+
+    def test_link_set_by_archlinux_java(self):
+        self.assertEqual(self.check(), "jdk-openjdk")
+
+    def test_other_owner_or_path(self):
+        self.assertIsNone(self.check(owner="jdk-openjdk"))
+        os.symlink("java-27-openjdk", f"{self.jvm}/other")
+        self.assertIsNone(self.check(path=f"{self.jvm}/other"))
+
+    def test_any_other_fault_keeps_it(self):
+        self.assertIsNone(self.check(said=("warning: java-runtime-common: {p} (UID mismatch)",)))
+
+    def test_target_outside_the_jvm_folder(self):
+        os.remove(self.link)
+        os.symlink("/tmp/java-27-openjdk", self.link)
+        self.assertIsNone(self.check())
+        os.remove(self.link)
+        os.symlink("../../tmp", self.link)
+        self.assertIsNone(self.check())
+
+    def test_target_not_a_folder_or_java_not_verified(self):
+        self.assertIsNone(self.check(verifies=False))
+        os.remove(self.link)
+        os.symlink("missing", self.link)
+        self.assertIsNone(self.check())
+
+    def test_explained_in_the_scan(self):
+        with mock.patch.object(self.r, "java_default_link", return_value="jdk-openjdk"):
+            out = list(self.r.explain_changes([("java-runtime-common", self.link)], None, None))
+        self.assertEqual(out, [(self.link, "PKG", "default Java link, set to jdk-openjdk by archlinux-java")])
+
+
 class CacheNow(unittest.TestCase):
     def test_gconv_rebuilt_into_a_temporary_file(self):
         r = load_report()

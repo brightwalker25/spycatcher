@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "brightwalker25.spycatcher",
   "name": "Spycatcher",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "brightwalker25",
   "license": "MIT",
   "description": "Catches signs that someone has been in the machine or tampered with it: changed system files, rootkits, leaked secrets, poisoned model files and exposed packages. That is what the name refers to. The weekly report sits in the bar, graded red, amber or green",

@@ -6,6 +6,20 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-10-22
+
+### Fixed
+
+- `/usr/lib/jvm/default` and `/usr/lib/jvm/default-runtime` were red after
+  every JDK install. java-runtime-common ships them, and archlinux-java, run
+  by each JDK's install script, points them at the default Java, so pacman
+  reports their target as changed. They are now a package change when
+  pacman reports nothing about them but their target and time, the target
+  is a folder directly in /usr/lib/jvm, and pacman verifies that folder's
+  `bin/java`. The scan now sends a package link whose only fault is its
+  target to these checks. Grading rules are version 6, and the report
+  re-checks such red lines in older logs.
+
 ## [0.5.0] - 2026-10-22
 
 ### Added
