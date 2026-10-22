@@ -15,6 +15,11 @@
 #          amber  = real exposure that is contained only while the action
 #                   is kept up; the action says how
 #          red    = needs doing now
+#          notice = standing advice, not graded, for an open CVE entry
+#                   only: a risk with no fix yet that a habit keeps
+#                   harmless. It is listed first, with its action as the
+#                   advice, until the finding goes away, but it never turns
+#                   the bar amber or red. Anywhere else it counts as amber
 #
 # An entry that stays amber for good turns the bar amber for good, and a bar
 # that never changes colour is soon ignored. Keep amber for exposures that
@@ -46,13 +51,14 @@ finding = "Fixed upstream in 9.8; 9.11 is installed."
 action = "None needed."
 
 # An open entry: no fix exists, but nothing on the machine meets the
-# condition the bug needs, so it is green. It would be amber if a script gave
-# wget a password.
+# condition the bug needs while the habit in the action is kept, so it is a
+# notice: the advice stays in view until a fix ships, and the bar is not
+# graded by it. It would be amber if a script gave wget a password.
 [cve.wget]
 assessed = 2026-09-23
 assessed_version = "1.25.0-6"
 status = "open"
-rating = "green"
+rating = "notice"
 confidence = "medium"
 risk = "wget sends your login to a second site if the first one redirects it (CVE-2021-31879)."
 finding = "Upstream never fixed this in wget 1.x. It only matters when wget is given a username and password, and nothing here does that."

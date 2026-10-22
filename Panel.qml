@@ -48,11 +48,16 @@ Panel {
   readonly property color okColor: "#3fb950"
   readonly property color warnColor: "#d29922"
   readonly property color badColor: "#f85149"
+  // Standing advice is not a fourth traffic light. It never changes a rating,
+  // so it gets a calm blue that cannot be read as a warning, fixed for the
+  // same reason as the three above.
+  readonly property color noticeColor: "#58a6ff"
 
   function ratingColor(rating) {
     if (rating === "green") return root.okColor
     if (rating === "amber") return root.warnColor
     if (rating === "red") return root.badColor
+    if (rating === "notice") return root.noticeColor
     return root.dim
   }
 
@@ -73,6 +78,11 @@ Panel {
   // What the bar widget reads. Empty whenever there is no report that parsed
   // cleanly, which the bar marks with a grey dot rather than no dot.
   readonly property string overall: rep ? String(rep.overall) : ""
+
+  // Standing advice: a known issue with no fix yet whose risk a habit
+  // contains, kept in view until the fix ships. Older reports have no such
+  // key, which means there is none.
+  readonly property var notices: rep && Array.isArray(rep.notices) ? rep.notices : []
 
   // The bar draws the tooltip with its own text item, which already shows
   // plain text. The report's line holds only counts, and the characters
@@ -191,6 +201,7 @@ Panel {
   // replaces the whole report and rebuilds every delegate. A section nobody
   // has touched is open when it has something to say and closed when green,
   // or when grey, which means off or not installed and is never a problem.
+  // A notice never changes a section's rating, so it never opens one either.
   property var expandedMap: ({})
   property var greenShownMap: ({})
 
@@ -211,12 +222,18 @@ Panel {
     root.greenShownMap = next
   }
 
+  // Notices count as not green, so they are never folded away with the
+  // green items, but they come after the findings that need attention.
   function itemsWhere(section, green) {
     var out = []
+    var notices = []
     var items = section && section.items ? section.items : []
-    for (var i = 0; i < items.length; i++)
-      if ((items[i].rating === "green") === green) out.push(items[i])
-    return out
+    for (var i = 0; i < items.length; i++) {
+      if ((items[i].rating === "green") !== green) continue
+      if (items[i].rating === "notice") notices.push(items[i])
+      else out.push(items[i])
+    }
+    return out.concat(notices)
   }
 
   // ------------------------------------------------------- open/close contract
@@ -344,7 +361,10 @@ Panel {
         textFormat: Text.PlainText
         width: parent.width
         visible: !finding.compact && !!(finding.item && finding.item.action)
-        text: finding.item && finding.item.action ? "What is being done: " + finding.item.action : ""
+        // A notice's action is advice for whoever uses the machine, not
+        // something the scans are doing.
+        text: finding.item && finding.item.action
+          ? (finding.item.rating === "notice" ? "Advice: " : "What is being done: ") + finding.item.action : ""
         color: root.foreground
         font.family: root.fontFamily
         font.pixelSize: Style.font.caption
@@ -581,6 +601,50 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: root.openFullReport()
+              }
+            }
+          }
+
+          // ---- Standing advice, above the sections so it stays in view for
+          // as long as the report carries it. Only what and the advice are
+          // shown; the section it belongs to lists it again with its detail.
+          Rectangle {
+            id: noticeBlock
+            width: parent.width
+            visible: root.notices.length > 0
+            implicitHeight: noticeColumn.implicitHeight + 2 * Style.spacing.sm
+            radius: Style.spacing.xs
+            color: Qt.rgba(root.noticeColor.r, root.noticeColor.g, root.noticeColor.b, 0.10)
+            border.width: 1
+            border.color: root.noticeColor
+
+            Column {
+              id: noticeColumn
+              x: Style.spacing.sm
+              y: Style.spacing.sm
+              width: noticeBlock.width - 2 * Style.spacing.sm
+              spacing: Style.spacing.sm
+
+              Text {
+                textFormat: Text.PlainText
+                text: "Standing advice"
+                color: root.noticeColor
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                font.bold: true
+              }
+
+              Repeater {
+                model: root.notices
+                delegate: FindingRow {
+                  required property var modelData
+                  width: noticeColumn.width
+                  item: ({
+                    rating: "notice",
+                    what: modelData && modelData.what ? String(modelData.what) : "",
+                    action: modelData && modelData.action ? String(modelData.action) : ""
+                  })
+                }
               }
             }
           }

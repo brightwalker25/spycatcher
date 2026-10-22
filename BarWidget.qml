@@ -11,7 +11,8 @@ import qs.Ui
 // One lock in the bar, tinted green, amber or red to match the report; every
 // section and finding lives in the panel. When the report could not be read
 // at all the lock is amber, since a silent failure would otherwise look the
-// same as green.
+// same as green. Standing advice never tints the lock: the report keeps it
+// out of the overall rating, and the panel shows it in its own block.
 //
 // The tint can be trusted even though it is only refreshed on a timer. The
 // report does not probe anything live: it reads results the scans have

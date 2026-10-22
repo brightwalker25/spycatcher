@@ -6,6 +6,30 @@ format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-22
+
+### Added
+
+- A CVE entry in the risk register with `status = "open"` may be rated
+  `notice`: standing advice for a risk
+  with no fix yet that a habit keeps harmless, such as wget's CVE-2021-31879,
+  which only matters if wget is given a username and password. A notice is
+  listed first, in blue, with its action as the advice, in the terminal
+  report, the HTML page and the panel, and stays until the tracker stops
+  listing the finding. It is not graded: it never makes a section or the
+  overall rating worse, so it cannot leave the bar amber with nothing to do,
+  or read as a sign that the machine was tampered with. The JSON report
+  gains a `notices` list. The example register rates wget a notice.
+  Existing registers are not changed by the installer; set `rating =
+  "notice"` by hand where it fits. On any other entry `notice` counts as
+  amber.
+
+### Fixed
+
+- A risk register rating the report does not know, such as a misspelling,
+  stopped the whole report, and the panel showed that it could not read it.
+  Such an entry is now amber.
+
 ## [0.4.4] - 2026-10-22
 
 ### Changed

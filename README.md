@@ -104,6 +104,7 @@ spycatcher-report --json         # what the widget reads
 
 Every item in the report is green, amber or red, every section takes the worst
 rating of its items, and the overall rating is the worst of the sections.
+A risk register entry may also be a notice, which is not graded; see below.
 
 Green means there is no real exposure: the issue is fixed, not reachable, not
 installed, or unfixed but negligible on this machine, so that a sensible habit
@@ -115,6 +116,19 @@ watching. Red means something needs doing now, and in the file integrity
 section it is kept for evidence: a package's file that fails pacman's check,
 a boot file that changed with no package update, or a file in a system code
 path that no package owns and that was written while pacman was not running.
+
+A notice is standing advice: a risk with no fix yet that a habit keeps
+harmless, such as wget's CVE-2021-31879, which only matters if wget is given a
+username and password. Rated `notice` on a CVE entry with `status = "open"`,
+the only kind of entry it applies to, it is listed first
+in the report and the panel, in blue, with the habit as its advice, and stays
+there until the tracker stops listing it. It never makes a section or the
+overall rating worse, so it cannot leave the bar amber with nothing to do, and
+it does not read as a sign that the machine has been tampered with. If the
+habit stops holding, rate the entry amber instead. On any other entry, such
+as a leaked secret, a privacy finding or a standing protection, there is
+something to do, so `notice` counts as amber there, as does a rating the
+report does not know, rather than stopping the report.
 
 ### Findings, items and acknowledgements
 

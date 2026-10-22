@@ -148,6 +148,14 @@ class PrivacySection(unittest.TestCase):
         reg = {"privacy": {"listen-leak": {"rating": "green"}}}
         self.assertEqual(self.section("red.json", reg).rating, "red")
 
+    def test_register_cannot_make_a_finding_a_notice(self):
+        # A notice is for a CVE with no fix; these have something to do.
+        reg = {"privacy": {"watch-unreviewed": {"rating": "notice"},
+                           "slipped": {"rating": "notice"}}}
+        s = self.section("amber.json", reg)
+        self.assertEqual(s.rating, "amber")
+        self.assertNotIn("notice", self.ratings(s))
+
     def test_register_cannot_raise_a_rating(self):
         reg = {"privacy": {"holding": {"rating": "red"}}}
         self.assertEqual(self.section("clean.json", reg).rating, "green")

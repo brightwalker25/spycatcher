@@ -50,7 +50,13 @@ GREEN, AMBER, RED = "green", "amber", "red"
 # Grey is neutral: off, not installed, or not applicable. It never makes a
 # section or the overall rating worse, so it ranks below green.
 GREY = "grey"
-ORDER = {GREY: -1, GREEN: 0, AMBER: 1, RED: 2}
+# A notice is standing advice: a risk with no fix yet that a habit keeps
+# harmless, such as never giving wget a password. It is listed at the top
+# until the finding goes away, but it is not graded: it never makes a
+# section or the overall rating worse, so a bar that cannot change colour is
+# not left amber. It sorts above green and below amber.
+NOTICE = "notice"
+ORDER = {GREY: -1, GREEN: 0, NOTICE: 0.5, AMBER: 1, RED: 2}
 
 # How long each scan may go quiet before the silence is itself a finding.
 # Amber at the first number of days, red at the second.
@@ -102,7 +108,26 @@ class Section:
 
     def add(self, rating, what, detail="", action=""):
         self.items.append((rating, plain(what), plain(detail), plain(action)))
-        self.rating = worst(self.rating, rating)
+        if rating != NOTICE:
+            self.rating = worst(self.rating, rating)
+
+
+def register_rating(e, notice=False):
+    """The rating a register entry gives, amber when it names none the
+    report knows, so a misspelt rating is shown rather than stopping the
+    report. A notice counts only where `notice` is true, an open CVE entry,
+    the one kind with no fix yet whose finding goes away on its own; anywhere
+    else, such as a leaked secret, a privacy finding or a standing
+    protection, there is something to do, so it is amber."""
+    r = e.get("rating", AMBER)
+    if r not in ORDER or (r == NOTICE and not notice):
+        return AMBER
+    return r
+
+
+def notices(sections):
+    """Every notice in the report, as (section title, what, detail, action)."""
+    return [(s.title, w, d, a) for s in sections for r, w, d, a in s.items if r == NOTICE]
 
 
 # --- log reading -------------------------------------------------------------
@@ -315,7 +340,6 @@ def packages(now, since, reg, installed):
               "Run: sudo pacman -Syu")
 
     cves = reg.get("cve", {})
-    counts = {GREEN: 0, AMBER: 0, RED: 0}
     for name, what, severity in affected:
         e = cves.get(name)
         if not e:
@@ -323,9 +347,8 @@ def packages(now, since, reg, installed):
             s.add(r, f"{name}: {what} ({severity.lower()} risk)",
                   "New since the last assessment.",
                   "Not yet assessed. Ask Claude to assess it and add it to the risk register.")
-            counts[r] += 1
             continue
-        r = e.get("rating", AMBER)
+        r = register_rating(e, notice=e.get("status") == "open")
         ver = installed.get(name)
         if ver and e.get("assessed_version") and vercmp(ver, e["assessed_version"]) < 0:
             r = worst(r, AMBER)
@@ -336,7 +359,6 @@ def packages(now, since, reg, installed):
                      "accepted": "accepted"}.get(e.get("status"), e.get("status", ""))
             s.add(r, f"{name}: {e.get('risk', what)}", f"{label.capitalize()}. {e.get('finding', '')}",
                   e.get("action", ""))
-        counts[r] += 1
 
     total = len(affected)
     stale = sum(1 for n, *_ in affected if cves.get(n, {}).get("status") == "stale")
@@ -2770,7 +2792,7 @@ def secrets(now, since, reg):
                       if e.get("repo") == repo and e.get("rule") in rules), None)
         name = Path(repo).name
         if entry:
-            s.add(entry.get("rating", AMBER), f"{name}: {entry.get('risk', '')}",
+            s.add(register_rating(entry), f"{name}: {entry.get('risk', '')}",
                   entry.get("finding", ""), entry.get("action", ""))
         else:
             s.add(RED, f"{name}: {n} possible secret(s) ({', '.join(sorted(rules))})",
@@ -2831,7 +2853,7 @@ def standing(reg):
     for key, e in reg.get("standing", {}).items():
         test = checks.get(e.get("check"))
         holds = test() if test else True
-        r = e.get("rating", AMBER)
+        r = register_rating(e)
         if not holds:
             r = RED
             s.add(r, e.get("risk", key), "This protection is no longer in place.",
@@ -2910,7 +2932,8 @@ def privacy(now, reg, location=None):
         # while the count stays at or below it, so a new finding is not hidden.
         e = accepted.get(key)
         if (isinstance(e, dict) and key != "listen-leak"
-                and e.get("rating") in ORDER and ORDER[e["rating"]] < ORDER[rating]
+                and e.get("rating") in ORDER and e["rating"] != NOTICE
+                and ORDER[e["rating"]] < ORDER[rating]
                 and (count is None or not isinstance(e.get("count"), int) or count <= e["count"])):
             rating = e["rating"]
             detail = " ".join(x for x in (detail, e.get("finding", "")) if x)
@@ -3148,19 +3171,22 @@ def installed_versions():
 
 # --- output ------------------------------------------------------------------
 
-LABEL = {GREY: "GREY", GREEN: "GREEN", AMBER: "AMBER", RED: "RED"}
-DOT = {GREY: "○", GREEN: "●", AMBER: "▲", RED: "■"}
-ANSI = {GREY: "\033[90m", GREEN: "\033[32m", AMBER: "\033[33m", RED: "\033[31m"}
+LABEL = {GREY: "GREY", GREEN: "GREEN", NOTICE: "NOTICE", AMBER: "AMBER", RED: "RED"}
+DOT = {GREY: "○", GREEN: "●", NOTICE: "◆", AMBER: "▲", RED: "■"}
+ANSI = {GREY: "\033[90m", GREEN: "\033[32m", NOTICE: "\033[34m", AMBER: "\033[33m",
+        RED: "\033[31m"}
 
 
 def overall_line(overall, sections):
     reds = sum(1 for s in sections for r, *_ in s.items if r == RED)
     ambers = sum(1 for s in sections for r, *_ in s.items if r == AMBER)
+    n = len(notices(sections))
+    advice = (f" {n} piece{'s' if n > 1 else ''} of standing advice, listed first." if n else "")
     if overall == GREEN:
-        return "Nothing needs your attention."
+        return "Nothing needs your attention." + advice
     if overall == RED:
-        return f"{reds} item(s) need action now; {ambers} are being managed."
-    return f"Nothing urgent. {ambers} item(s) are open and being managed."
+        return f"{reds} item(s) need action now; {ambers} are being managed." + advice
+    return f"Nothing urgent. {ambers} item(s) are open and being managed." + advice
 
 
 def text_report(sections, overall, start, end, colour, show_all=False):
@@ -3169,6 +3195,15 @@ def text_report(sections, overall, start, end, colour, show_all=False):
     bold = (lambda t: f"\033[1m{t}\033[0m") if colour else (lambda t: t)
     out = [bold(f"Spycatcher report, {start:%a %d %b} to {end:%a %d %b %Y}"),
            f"Overall: {c(overall, DOT[overall] + ' ' + LABEL[overall])}. {overall_line(overall, sections)}", ""]
+    advice = notices(sections)
+    if advice:
+        out.append(f"{c(NOTICE, DOT[NOTICE] + ' ' + 'ADVICE')}  {bold('Standing advice')}")
+        out.append("          No fix yet, and nothing wrong while the advice is kept. Listed until the finding goes away.")
+        for _, what, detail, action in advice:
+            out.append(f"          {c(NOTICE, DOT[NOTICE])} {what}")
+            if action:
+                out.append(f"              Advice: {action}")
+        out.append("")
     for s in sections:
         out.append(f"{c(s.rating, DOT[s.rating] + ' ' + LABEL[s.rating]):<8}  {bold(plain(s.title))}")
         out.append(f"          {plain(s.headline)}")
@@ -3182,7 +3217,9 @@ def text_report(sections, overall, start, end, colour, show_all=False):
             out.append(f"          {c(r, DOT[r])} {what}")
             if detail:
                 out.append(f"              {detail}")
-            if action and r != GREEN:
+            if action and r == NOTICE:
+                out.append(f"              Advice: {action}")
+            elif action and r != GREEN:
                 out.append(f"              What is being done: {action}")
         if hidden:
             out.append(f"          {c(GREEN, DOT[GREEN])} {hidden} more item(s) are green (--all lists them)")
@@ -3200,13 +3237,23 @@ def html_report(sections, overall, start, end):
                 f'<li class="{r}"><span class="pill {r}">{LABEL[r]}</span>'
                 f'<div><div class="what">{e(what)}</div>'
                 + (f'<div class="detail">{e(detail)}</div>' if detail else "")
-                + (f'<div class="action"><b>What is being done:</b> {e(action)}</div>' if action else "")
+                + (f'<div class="action"><b>{"Advice" if r == NOTICE else "What is being done"}:</b> '
+                   f'{e(action)}</div>' if action else "")
                 + "</div></li>")
         rows.append(
             f'<details class="card {s.rating}" {"open" if s.rating not in (GREEN, GREY) else ""}>'
             f'<summary><span class="pill {s.rating}">{LABEL[s.rating]}</span>'
             f'<span class="title">{e(plain(s.title))}</span></summary>'
             f'<p class="headline">{e(plain(s.headline))}</p><ul>{"".join(items)}</ul></details>')
+    advice = "".join(
+        f'<li class="{NOTICE}"><span class="pill {NOTICE}">{LABEL[NOTICE]}</span>'
+        f'<div><div class="what">{e(what)}</div>'
+        + (f'<div class="action"><b>Advice:</b> {e(action)}</div>' if action else "")
+        + "</div></li>" for _, what, _, action in notices(sections))
+    if advice:
+        advice = ('<div class="card advice"><p class="title">Standing advice</p>'
+                  '<p class="headline">No fix yet, and nothing wrong while the advice is kept. '
+                  f'Listed until the finding goes away.</p><ul>{advice}</ul></div>')
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -3214,10 +3261,12 @@ def html_report(sections, overall, start, end):
 <style>
 :root {{ --bg:#f6f6f4; --card:#fff; --ink:#1d1d1b; --muted:#5f5f5a; --line:#e2e2dd;
   --green:#1f7a3f; --green-bg:#e3f3e8; --amber:#8a5a00; --amber-bg:#fdf0d5;
-  --red:#b3261e; --red-bg:#fbe3e1; --grey:#5f5f5a; --grey-bg:#ecece8; }}
+  --red:#b3261e; --red-bg:#fbe3e1; --grey:#5f5f5a; --grey-bg:#ecece8;
+  --notice:#1f5fa8; --notice-bg:#e2edfa; }}
 @media (prefers-color-scheme: dark) {{ :root {{ --bg:#141413; --card:#1f1f1d; --ink:#ecece8;
   --muted:#a3a39c; --line:#33332f; --green:#6fd08c; --green-bg:#16301f; --amber:#f2c14e;
-  --amber-bg:#3a2d10; --red:#ff8a80; --red-bg:#3d1916; --grey:#a3a39c; --grey-bg:#2a2a27; }} }}
+  --amber-bg:#3a2d10; --red:#ff8a80; --red-bg:#3d1916; --grey:#a3a39c; --grey-bg:#2a2a27;
+  --notice:#79b8ff; --notice-bg:#13283f; }} }}
 body {{ margin:0; background:var(--bg); color:var(--ink);
   font:15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }}
 main {{ max-width:860px; margin:0 auto; padding:24px 16px 48px; }}
@@ -3242,6 +3291,8 @@ li {{ display:flex; gap:10px; padding:10px 0; border-top:1px solid var(--line); 
 .pill.amber {{ color:var(--amber); background:var(--amber-bg); }}
 .pill.red {{ color:var(--red); background:var(--red-bg); }}
 .pill.grey {{ color:var(--grey); background:var(--grey-bg); }}
+.pill.notice {{ color:var(--notice); background:var(--notice-bg); }}
+.card.advice {{ border-left-color:var(--notice); }}
 .what {{ font-weight:500; overflow-wrap:anywhere; }}
 .detail {{ color:var(--muted); overflow-wrap:anywhere; }}
 .action {{ margin-top:4px; }}
@@ -3250,7 +3301,7 @@ li {{ display:flex; gap:10px; padding:10px 0; border-top:1px solid var(--line); 
 <p class="sub">{start:%a %d %b} to {end:%a %d %b %Y}, generated {end:%H:%M}</p>
 <div class="overall"><span class="pill {overall}">{LABEL[overall]}</span>
 <span>{e(overall_line(overall, sections))}</span></div>
-{"".join(rows)}
+{advice}{"".join(rows)}
 </main></body></html>
 """
 
@@ -3471,6 +3522,8 @@ def main():
             "line": overall_line(overall, sections),
             "start": since.isoformat(),
             "end": now.isoformat(),
+            "notices": [{"section": plain(sec), "what": w, "detail": d, "action": act}
+                        for sec, w, d, act in notices(sections)],
             "sections": [{
                 "title": plain(s.title), "rating": s.rating, "headline": plain(s.headline),
                 "items": [{"rating": r, "what": w, "detail": d, "action": act}
